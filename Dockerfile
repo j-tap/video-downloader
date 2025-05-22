@@ -10,8 +10,6 @@ WORKDIR /app
 
 COPY . .
 
-COPY data/ /app/data/
-
 RUN bun install
 
 EXPOSE 3000
