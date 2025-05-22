@@ -1,5 +1,5 @@
 services:
-  svr9pro:
+  downloadervr9pro:
     ports: []
     restart: unless-stopped
     environment:
@@ -12,3 +12,7 @@ services:
     command: bun server/index.mjs
     networks:
       - traefik
+
+networks:
+  traefik:
+    external: true
