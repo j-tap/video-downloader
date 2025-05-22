@@ -9,7 +9,6 @@ services:
       dockerfile: Dockerfile
       args:
         MODE: production
-    command: bun server/index.mjs
     networks:
       - traefik
 
