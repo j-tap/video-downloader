@@ -1,20 +1,20 @@
 services:
-  svr9pro:
+  downloadervr9pro:
     networks:
       - traefik
     labels:
       - "traefik.enable=true"
 
       # HTTPS
-      - "traefik.http.routers.svr9pro.rule=Host(`${TRAEFIK_DOMAIN}`)"
-      - "traefik.http.routers.svr9pro.entrypoints=websecure"
-      - "traefik.http.routers.svr9pro.tls.certresolver=myresolver"
-      - "traefik.http.services.svr9pro.loadbalancer.server.port=${PORT}"
+      - "traefik.http.routers.downloadervr9pro.rule=Host(`${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.downloadervr9pro.entrypoints=websecure"
+      - "traefik.http.routers.downloadervr9pro.tls.certresolver=myresolver"
+      - "traefik.http.services.downloadervr9pro.loadbalancer.server.port=${PORT}"
 
       # HTTP redirect
-      - "traefik.http.routers.svr9pro-http.rule=Host(`${TRAEFIK_DOMAIN}`)"
-      - "traefik.http.routers.svr9pro-http.entrypoints=web"
-      - "traefik.http.routers.svr9pro-http.middlewares=https-redirect"
+      - "traefik.http.routers.downloadervr9pro-http.rule=Host(`${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.downloadervr9pro-http.entrypoints=web"
+      - "traefik.http.routers.downloadervr9pro-http.middlewares=https-redirect"
 
       # Middleware definition
       - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
