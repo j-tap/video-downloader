@@ -10,7 +10,7 @@ WORKDIR /app
 
 COPY . .
 
-COPY data /app/data
+COPY data/cookiesYoutube.txt /app/data/cookiesYoutube.txt
 
 RUN bun install
 
