@@ -8,6 +8,8 @@ RUN apt update && \
 
 WORKDIR /app
 
+COPY data /app/data
+
 COPY . .
 
 RUN bun install
