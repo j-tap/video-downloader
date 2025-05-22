@@ -2,6 +2,7 @@ const form = document.getElementById('form')
 const urlInput = document.getElementById('url')
 const statusText = document.getElementById('status')
 const submitBtn = document.getElementById('submitBtn')
+const spinner = document.getElementById('spinner')
 
 form.onsubmit = async (e) => {
   e.preventDefault()
@@ -42,9 +43,14 @@ function isValidUrl(url) {
 }
 
 function setLoading(isLoading) {
-  submitBtn.disabled = isLoading
   urlInput.disabled = isLoading
   form.classList.toggle('loading', isLoading)
+
+  if (isLoading) {
+    spinner.classList.remove('hidden')
+  } else {
+    spinner.classList.add('hidden')
+  }
 }
 
 async function pollStatus(id) {
@@ -53,7 +59,7 @@ async function pollStatus(id) {
       const res = await fetch(`/status/${id}`)
       if (!res.ok) throw new Error('Status check failed')
 
-      const { status } = await res.json()
+      const { status, error } = await res.json()
       statusText.textContent = `📡 Download status: ${status}`
 
       if (status === 'done') {
@@ -65,7 +71,7 @@ async function pollStatus(id) {
 
       if (status === 'error') {
         clearInterval(interval)
-        statusText.textContent = '❌ Error during download'
+        statusText.textContent = `❌ Download failed: ${error || 'Unknown error'}`
         setLoading(false)
       }
     } catch (err) {

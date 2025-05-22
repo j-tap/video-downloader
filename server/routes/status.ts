@@ -8,5 +8,5 @@ export function statusHandler(req: Request, res: Response) {
   const entry = getDownloadStatus(id)
   if (!entry) return res.status(404).json({ error: 'Not found' })
 
-  res.json({ status: entry.status })
+  res.json({ status: entry.status, error: entry.error })
 }
