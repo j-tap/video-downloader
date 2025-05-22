@@ -1,0 +1,14 @@
+services:
+  svr9pro:
+    ports: []
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    build:
+      context: ./
+      dockerfile: Dockerfile
+      args:
+        MODE: production
+    command: bun server/index.mjs
+    networks:
+      - traefik

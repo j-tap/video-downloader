@@ -1,0 +1,170 @@
+:root {
+  --text-color: #dce4e4;
+  --bg: #122030;
+  --field-size: 60px;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 0;
+  font-family: sans-serif;
+  background: var(--bg);
+  color: var(--text-color);
+  font-size: 16px;
+}
+
+.field {
+  height: var(--field-size);
+  padding: 10px;
+  display: inline-flex;
+  position: relative;
+}
+.btn {
+  height: var(--field-size);
+  line-height: var(--field-size);
+  font-size: calc(var(--field-size) / 4);
+  cursor: pointer;
+  padding: 0 calc(var(--field-size) / 2);
+  border-radius: 50px;
+  background: var(--bg);
+  color: inherit;
+  border: none;
+  white-space: nowrap;
+  box-shadow:
+    6px 6px 8px 0 rgba(0,0,0, .2),
+    -4px -4px 6px 0 rgba(255,255,255, .03);
+  transition: box-shadow .15s ease-out, transform .15s ease-out;
+}
+.btn:hover, .btn:focus {
+  outline: none;
+  transform: translateY(-1px);
+  box-shadow:
+    8px 8px 11px 0 rgba(0,0,0, .2),
+    -6px -6px 9px 0 rgba(255,255,255, .03);
+}
+.btn:active {
+  outline: none;
+  transform: translateY(1px);
+  box-shadow:
+    3px 3px 5px 0 rgba(0,0,0, .2),
+    -2px -2px 4px 0 rgba(255,255,255, .03);
+}
+
+.notify {
+  position: absolute;
+  top: calc(100% + 10px);
+  padding: calc(var(--field-size) / 3);
+  font-size: 80%;
+  border-radius: 16px;
+  background: rgba(255,255,255,.05);
+}
+.notify:empty {
+  display: none;
+}
+
+.app {
+
+}
+.app-head {
+  position: relative;
+  margin: 0 0 calc(var(--field-size) / 2);
+  text-align: center;
+}
+.app-title {
+  font-size: 48px;
+  font-weight: 700;
+  margin: 0;
+  padding: 0;
+}
+.app-descr {
+  margin: 0;
+  padding: 0;
+}
+.app-center {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+.form {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: clamp(300px, 50%, 600px);
+}
+.form__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+.form__field {
+  display: inline-flex;
+  position: relative;
+}
+.form__field input {
+  width: 100%;
+  display: block;
+  outline: none;
+  border: none;
+  background: transparent;
+  padding: 0 calc(var(--field-size) / 2);
+  font-size: calc(var(--field-size) / 4);
+  color: var(--text-color);
+  font-family: termina, sans-serif;
+}
+.form__field input::placeholder {
+  color: var(--text-color);
+}
+.form__field input:-webkit-autofill,
+.form__field input:-webkit-autofill:hover,
+.form__field input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text-color);
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+.form__field::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  filter: brightness(1.2);
+  transition: 0.3s ease-out;
+  pointer-events: none;
+  border-radius: 40px;
+  box-shadow: inset -2px -2px 8px var(--bg);
+}
+.form__field::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  filter: brightness(0.8);
+  transition: 0.3s ease-out;
+  pointer-events: none;
+  border-radius: 40px;
+  box-shadow: inset 4px 4px 8px var(--bg);
+}
+.form__field:focus-within::before {
+  box-shadow: inset -3px -3px 15px var(--bg);
+}
+.form__field:focus-within::after {
+  box-shadow: inset 8px 8px 15px var(--bg);
+}
+
+.form__row .form__field {
+  flex-grow: 1;
+  margin-right: 10px;
+}

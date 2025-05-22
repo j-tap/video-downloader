@@ -1,0 +1,24 @@
+services:
+  svr9pro:
+    networks:
+      - traefik
+    labels:
+      - "traefik.enable=true"
+
+      # HTTPS
+      - "traefik.http.routers.svr9pro.rule=Host(`${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.svr9pro.entrypoints=websecure"
+      - "traefik.http.routers.svr9pro.tls.certresolver=myresolver"
+      - "traefik.http.services.svr9pro.loadbalancer.server.port=${PORT}"
+
+      # HTTP redirect
+      - "traefik.http.routers.svr9pro-http.rule=Host(`${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.svr9pro-http.entrypoints=web"
+      - "traefik.http.routers.svr9pro-http.middlewares=https-redirect"
+
+      # Middleware definition
+      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+
+networks:
+  traefik:
+    external: true

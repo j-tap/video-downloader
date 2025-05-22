@@ -1,0 +1,25 @@
+{
+  "name": "video-downloader",
+  "author": "j-tap",
+  "version": "0.0.1",
+  "module": "index.ts",
+  "type": "module",
+  "private": false,
+  "scripts": {
+    "dev": "bun server/index.ts",
+    "start": "bun server/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/cors": "^2.8.18",
+    "@types/express": "^5.0.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0"
+  }
+}
