@@ -80,7 +80,7 @@ function runYouTubeDownload(url: string, filePath: string, id: string): void {
 
   const args = [
     '--no-playlist',
-    '--cookies', '/app/data/cookiesYoutube.txt',
+    '--proxy', 'socks5://127.0.0.1:9050',
     '-f', '232+234/best',
     '--merge-output-format', 'mp4',
     '-o', filePath,
