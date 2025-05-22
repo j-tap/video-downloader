@@ -1,4 +1,7 @@
-export $(shell grep -v '^#' .env | xargs)
+ifneq ("$(wildcard .env)", "")
+  include .env
+  export
+endif
 
 build:
 	docker build -t $(APP_NAME) .
