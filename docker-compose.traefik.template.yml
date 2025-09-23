@@ -14,10 +14,10 @@ services:
       # HTTP redirect
       - "traefik.http.routers.downloadervr9pro-http.rule=Host(`${TRAEFIK_DOMAIN}`)"
       - "traefik.http.routers.downloadervr9pro-http.entrypoints=web"
-      - "traefik.http.routers.downloadervr9pro-http.middlewares=https-redirect"
+      - "traefik.http.routers.downloadervr9pro-http.middlewares=downloader-https-redirect"
 
       # Middleware definition
-      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.downloader-https-redirect.redirectscheme.scheme=https"
 
 networks:
   traefik:
