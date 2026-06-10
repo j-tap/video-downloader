@@ -60,7 +60,7 @@ function normalizeUrl(url: string): string {
 function runDownloadProcess(url: string, filePath: string, id: string): void {
   console.log(`▶️  [${id}] Starting download: ${url}`)
 
-  const args = buildYtDlpArgs(url, filePath, { attempt: 0 })
+  const args = buildYtDlpArgs(url, filePath, id, { attempt: 0 })
   runYtDlpProcess(args, id, filePath, { url, filePath, attempt: 0, useProxy: true })
 }
 
@@ -69,7 +69,7 @@ interface BuildOptions {
   useProxy?: boolean
 }
 
-function buildYtDlpArgs(url: string, filePath: string, options: BuildOptions = {}): string[] {
+function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
   const { attempt = 0, useProxy = true } = options
   const args = [
     '--no-playlist',
@@ -80,7 +80,7 @@ function buildYtDlpArgs(url: string, filePath: string, options: BuildOptions = {
     '--fragment-retries', '5',
     ...getJsRuntimeArgs(),
     ...getProxyArgs(useProxy),
-    ...getCookiesArgs(),
+    ...getCookiesArgs(id),
     ...getPlatformArgs(url, attempt),
     '-o', filePath,
     url,
@@ -119,12 +119,21 @@ function getProxyArgs(useProxy = true): string[] {
   return proxy ? ['--proxy', proxy] : []
 }
 
-function getCookiesArgs(): string[] {
+function getTempCookiesPath(id: string): string {
+  return path.join(tmpdir(), `cookies-${id}.txt`)
+}
+
+function getCookiesArgs(id: string): string[] {
   const cookiesFile = process.env.YT_COOKIES_FILE
-  if (cookiesFile && fs.existsSync(cookiesFile)) {
-    return ['--cookies', cookiesFile]
-  }
-  return []
+  if (!cookiesFile || !fs.existsSync(cookiesFile)) return []
+
+  const tmpCookies = getTempCookiesPath(id)
+  fs.copyFileSync(cookiesFile, tmpCookies)
+  return ['--cookies', tmpCookies]
+}
+
+function cleanupTempCookies(id: string): void {
+  fs.unlink(getTempCookiesPath(id), () => {})
 }
 
 function isYouTube(url: string): boolean {
@@ -241,9 +250,13 @@ function runYtDlpProcess(
     const logSummary = stderrChunks.join('').trim()
 
     if (code === 0) {
-      if (!verifyDownloadedFile(id, filePath, entry)) return
+      if (!verifyDownloadedFile(id, filePath, entry)) {
+        cleanupTempCookies(id)
+        return
+      }
       entry.status = 'done'
       scheduleCleanup(entry)
+      cleanupTempCookies(id)
       return
     }
 
@@ -252,6 +265,7 @@ function runYtDlpProcess(
     console.error(`❌  [${id}] yt-dlp exited with code ${code}`)
     entry.status = 'error'
     entry.error = cleanErrorMessage(logSummary) || `yt-dlp exited with code ${code}`
+    cleanupTempCookies(id)
   })
 }
 
@@ -285,7 +299,7 @@ function tryRetry(
 
   if (hasProxy && isProxyError) {
     console.log(`⚠️  [${id}] Proxy error, retrying without proxy...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, { attempt: ctx.attempt, useProxy: false })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { attempt: ctx.attempt, useProxy: false })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useProxy: false })
     return true
   }
@@ -293,7 +307,7 @@ function tryRetry(
   if (isYouTubeError && ctx.attempt < 2 && !process.env.YT_PLAYER_CLIENT) {
     const nextAttempt = ctx.attempt + 1
     console.log(`⚠️  [${id}] YouTube error, retrying with fallback player_client (attempt ${nextAttempt})...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, { attempt: nextAttempt, useProxy: ctx.useProxy })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { attempt: nextAttempt, useProxy: ctx.useProxy })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, attempt: nextAttempt })
     return true
   }
