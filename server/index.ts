@@ -4,6 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import 'dotenv/config'
 import { registerRoutes } from './routes'
+import { verifyYtDlp } from './lib/downloader'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -46,7 +47,15 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(clientPath, 'index.html'))
 })
 
+const ytDlp = verifyYtDlp()
+if (!ytDlp.ok) {
+  console.error(`❌ yt-dlp unavailable: ${ytDlp.error}`)
+  console.error('Install: pip install "yt-dlp[default]" or set YTDLP_PATH')
+  process.exit(1)
+}
+
 app.listen(port, () => {
   console.log(`Server started on http://localhost:${port}`)
+  console.log(`yt-dlp ${ytDlp.version}`)
   console.log(`Client path: ${clientPath}`)
 })

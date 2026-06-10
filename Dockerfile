@@ -6,15 +6,17 @@ RUN apt update && \
     python3-pip \
     ffmpeg \
     curl \
-    tor \
+    unzip \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
-    chmod +x /usr/local/bin/yt-dlp && \
-    yt-dlp --version
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 
-RUN echo "SOCKSPort 9050" >> /etc/tor/torrc || true
+ENV DENO_INSTALL=/usr/local
+ENV PATH="/usr/local/bin:${PATH}"
+
+RUN pip3 install --break-system-packages --no-cache-dir "yt-dlp[default,curl-cffi]" && \
+    yt-dlp --version
 
 WORKDIR /app
 
@@ -25,4 +27,4 @@ COPY . .
 
 EXPOSE 3000
 
-CMD tor & sleep 5 && bun server/index.ts
+CMD bun server/index.ts
