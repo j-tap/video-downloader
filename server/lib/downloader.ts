@@ -2,9 +2,9 @@ import fs from 'fs'
 import path from 'path'
 import { tmpdir } from 'os'
 import crypto from 'crypto'
-import { spawn, spawnSync } from 'child_process'
+import { spawn, spawnSync, type ChildProcess } from 'child_process'
 
-type Status = 'pending' | 'done' | 'error'
+type Status = 'pending' | 'done' | 'error' | 'cancelled'
 
 export interface DownloadEntry {
   id: string
@@ -16,6 +16,7 @@ export interface DownloadEntry {
 }
 
 const downloads = new Map<string, DownloadEntry>()
+const processes = new Map<string, ChildProcess>()
 
 const YTDLP_BIN = process.env.YTDLP_PATH || 'yt-dlp'
 
@@ -84,6 +85,23 @@ export function downloadVideo(url: string): string {
   runDownloadProcess(normalizeUrl(url), filePath, id)
 
   return id
+}
+
+export function cancelDownload(id: string): boolean {
+  const entry = downloads.get(id)
+  if (!entry || entry.status !== 'pending') return false
+
+  entry.status = 'cancelled'
+  console.log(`⏹️  [${id}] Download cancelled`)
+
+  const child = processes.get(id)
+  if (child && !child.killed) {
+    child.kill('SIGTERM')
+  }
+
+  cleanupDownloadArtifacts(id)
+  setTimeout(() => downloads.delete(id), 60_000)
+  return true
 }
 
 function generateId(): string {
@@ -184,6 +202,21 @@ function cleanupTempCookies(id: string): void {
   fs.unlink(getTempCookiesPath(id), () => {})
 }
 
+function cleanupDownloadArtifacts(id: string): void {
+  cleanupTempCookies(id)
+  processes.delete(id)
+
+  const entry = downloads.get(id)
+  if (!entry) return
+
+  fs.unlink(entry.filePath, () => {})
+}
+
+function isCancelled(id: string): boolean {
+  const entry = downloads.get(id)
+  return entry?.status === 'cancelled'
+}
+
 function isYouTube(url: string): boolean {
   return /youtube\.com|youtu\.be/.test(url)
 }
@@ -268,9 +301,12 @@ function runYtDlpProcess(
   console.log(`▶️ yt-dlp [attempt ${ctx.attempt}]:`, args.join(' '))
 
   const child = spawn(YTDLP_BIN, args)
+  processes.set(id, child)
   const stderrChunks: string[] = []
 
   const handleOutput = (message: string) => {
+    if (isCancelled(id)) return
+
     const progress = parseProgress(message)
     if (progress !== null) {
       const entry = downloads.get(id)
@@ -292,14 +328,18 @@ function runYtDlpProcess(
   })
 
   child.on('close', (code) => {
+    processes.delete(id)
+
     const entry = downloads.get(id)
     if (!entry) return
+
+    if (isCancelled(id)) return
 
     const logSummary = stderrChunks.join('').trim()
 
     if (code === 0) {
       if (!verifyDownloadedFile(id, filePath, entry)) {
-        cleanupTempCookies(id)
+        cleanupDownloadArtifacts(id)
         return
       }
       entry.status = 'done'
@@ -310,10 +350,8 @@ function runYtDlpProcess(
 
     if (tryRetry(id, filePath, entry, logSummary, ctx)) return
 
-    console.error(`❌  [${id}] yt-dlp exited with code ${code}`)
-    entry.status = 'error'
-    entry.error = cleanErrorMessage(logSummary) || `yt-dlp exited with code ${code}`
-    cleanupTempCookies(id)
+    failDownload(id, entry, logSummary, code ?? undefined)
+    cleanupDownloadArtifacts(id)
   })
 }
 
@@ -321,15 +359,13 @@ function verifyDownloadedFile(id: string, filePath: string, entry: DownloadEntry
   try {
     const stats = fs.statSync(filePath)
     if (stats.size === 0) {
-      entry.status = 'error'
-      entry.error = 'Скачанный файл пустой'
+      failDownload(id, entry, 'Downloaded file is empty')
       return false
     }
     console.log(`✅  [${id}] Download complete (${(stats.size / 1024 / 1024).toFixed(2)} MB)`)
     return true
   } catch {
-    entry.status = 'error'
-    entry.error = 'Файл не найден после скачивания'
+    failDownload(id, entry, 'File not found after download')
     return false
   }
 }
@@ -341,6 +377,8 @@ function tryRetry(
   logSummary: string,
   ctx: RunContext,
 ): boolean {
+  if (isCancelled(id)) return false
+
   const hasProxy = ctx.useProxy && (process.env.YT_PROXY || process.env.PROXY) !== undefined
   const isProxyError = /timed out|proxy|Connection refused|SocksHTTPSConnection|Unable to download|Failed to establish/i.test(logSummary)
   const isYouTubeError = isYouTube(entry.url) && /PO Token|reloaded|403|Sign in|age.restricted|format.*not available/i.test(logSummary)
@@ -375,6 +413,29 @@ function parseProgress(message: string): number | null {
   if (!percentMatch?.[1]) return null
   const percent = parseFloat(percentMatch[1])
   return Math.min(100, Math.max(0, percent))
+}
+
+function failDownload(id: string, entry: DownloadEntry, logSummary: string, code?: number): void {
+  const detail = cleanErrorMessage(logSummary) || (code !== undefined ? `yt-dlp exited with code ${code}` : logSummary)
+  console.error(`❌  [${id}] Download failed: ${detail}`)
+  if (logSummary && logSummary !== detail) {
+    console.error(`❌  [${id}] Full log:\n${logSummary}`)
+  }
+  entry.status = 'error'
+  entry.error = getPublicErrorMessage(detail)
+}
+
+function getPublicErrorMessage(detail: string): string {
+  if (/Sign in to confirm/i.test(detail)) {
+    return 'Download failed'
+  }
+  if (/Connection refused|SocksHTTPSConnection|proxy/i.test(detail)) {
+    return 'Connection error'
+  }
+  if (/age.restricted/i.test(detail)) {
+    return 'Download failed'
+  }
+  return 'Download failed'
 }
 
 function cleanErrorMessage(error: string): string {

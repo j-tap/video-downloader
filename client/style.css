@@ -217,6 +217,17 @@ body {
   margin-right: 10px;
 }
 
+.btn--cancel {
+  margin-left: 10px;
+  opacity: 0.85;
+}
+
+.form__row .btn--cancel {
+  @media screen and (max-width: 767px) {
+    margin-left: 0;
+  }
+}
+
 .form__btn {
   @media screen and (max-width: 767px) {
     width: 100%
