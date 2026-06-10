@@ -4,7 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import 'dotenv/config'
 import { registerRoutes } from './routes'
-import { verifyYtDlp } from './lib/downloader'
+import { getCookiesConfig, verifyYtDlp } from './lib/downloader'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -58,4 +58,13 @@ app.listen(port, () => {
   console.log(`Server started on http://localhost:${port}`)
   console.log(`yt-dlp ${ytDlp.version}`)
   console.log(`Client path: ${clientPath}`)
+
+  const cookies = getCookiesConfig()
+  if (cookies.fromBrowser) {
+    console.log(`YouTube cookies: --cookies-from-browser ${cookies.fromBrowser}`)
+  } else if (cookies.file) {
+    console.log(`YouTube cookies: ${cookies.file}`)
+  } else {
+    console.warn('YouTube cookies: не настроены (data/cookiesYoutube.txt или YT_COOKIES_FILE)')
+  }
 })

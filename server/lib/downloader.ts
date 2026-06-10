@@ -19,6 +19,49 @@ const downloads = new Map<string, DownloadEntry>()
 
 const YTDLP_BIN = process.env.YTDLP_PATH || 'yt-dlp'
 
+const COOKIES_CANDIDATES = [
+  process.env.YT_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesYoutube.txt'),
+  '/app/data/cookiesYoutube.txt',
+].filter(Boolean) as string[]
+
+let resolvedCookiesFile: string | null = null
+
+export function resolveCookiesFile(): string | null {
+  if (resolvedCookiesFile !== null) {
+    return resolvedCookiesFile || null
+  }
+
+  for (const candidate of COOKIES_CANDIDATES) {
+    const resolved = path.isAbsolute(candidate)
+      ? candidate
+      : path.resolve(process.cwd(), candidate)
+
+    if (fs.existsSync(resolved)) {
+      resolvedCookiesFile = resolved
+      return resolved
+    }
+  }
+
+  resolvedCookiesFile = ''
+  return null
+}
+
+export function getCookiesConfig(): {
+  file: string | null
+  fromBrowser: string | null
+  configured: boolean
+} {
+  const fromBrowser = process.env.YT_COOKIES_FROM_BROWSER?.trim() || null
+  const file = resolveCookiesFile()
+
+  return {
+    file,
+    fromBrowser,
+    configured: Boolean(file || fromBrowser),
+  }
+}
+
 export function getDownloadStatus(id: string): DownloadEntry | undefined {
   return downloads.get(id)
 }
@@ -124,8 +167,13 @@ function getTempCookiesPath(id: string): string {
 }
 
 function getCookiesArgs(id: string): string[] {
-  const cookiesFile = process.env.YT_COOKIES_FILE
-  if (!cookiesFile || !fs.existsSync(cookiesFile)) return []
+  const fromBrowser = process.env.YT_COOKIES_FROM_BROWSER?.trim()
+  if (fromBrowser) {
+    return ['--cookies-from-browser', fromBrowser]
+  }
+
+  const cookiesFile = resolveCookiesFile()
+  if (!cookiesFile) return []
 
   const tmpCookies = getTempCookiesPath(id)
   fs.copyFileSync(cookiesFile, tmpCookies)
@@ -195,11 +243,11 @@ function getYouTubePlayerClient(attempt: number): string | null {
     return process.env.YT_PLAYER_CLIENT
   }
 
-  const fallbacks = [
-    null,
-    'mweb,android_vr,web_safari',
-    'android,web',
-  ]
+  const hasCookies = getCookiesConfig().configured
+
+  const fallbacks = hasCookies
+    ? ['web,web_safari', 'mweb,android_vr', 'android,web']
+    : [null, 'mweb,android_vr,web_safari', 'android,web']
 
   return fallbacks[attempt] ?? fallbacks[fallbacks.length - 1]!
 }
@@ -332,6 +380,14 @@ function parseProgress(message: string): number | null {
 function cleanErrorMessage(error: string): string {
   if (error.includes('Connection refused') && error.includes('SocksHTTPSConnection')) {
     return 'Ошибка подключения к прокси. Проверьте YT_PROXY или отключите прокси.'
+  }
+
+  if (/Sign in to confirm/i.test(error)) {
+    const cookies = getCookiesConfig()
+    if (!cookies.configured) {
+      return 'YouTube требует авторизацию. Укажите YT_COOKIES_FILE (файл Netscape в data/cookiesYoutube.txt) или YT_COOKIES_FROM_BROWSER.'
+    }
+    return 'YouTube не принял cookies: обновите cookiesYoutube.txt (экспорт из браузера, где YouTube открывается без капчи) или проверьте IP сервера.'
   }
 
   const lines = error.split('\n')
