@@ -480,20 +480,39 @@ function failDownload(id: string, entry: DownloadEntry, logSummary: string, code
     console.error(`❌  [${id}] Full log:\n${logSummary}`)
   }
   entry.status = 'error'
-  entry.error = getPublicErrorMessage(detail)
+  entry.error = getPublicErrorMessage(detail, entry.url)
 }
 
-function getPublicErrorMessage(detail: string): string {
+function getPublicErrorMessage(detail: string, url: string): string {
+  if (isKinoPub(url) && /authoriz|login|sign in|403|forbidden|unauthorized|access denied|cookies/i.test(detail)) {
+    const hasCookies = Boolean(getCookiesFromBrowser(url) || resolveCookiesFile(url))
+    if (!hasCookies) {
+      return 'kino.pub требует авторизацию: добавьте KINOPUB_COOKIES_FILE (data/cookiesKinoPub.txt) или KINOPUB_COOKIES_FROM_BROWSER.'
+    }
+    return 'kino.pub не принял cookies: обновите cookiesKinoPub.txt (экспорт из браузера с активной сессией).'
+  }
+
   if (/Sign in to confirm/i.test(detail)) {
-    return 'Download failed'
+    return 'Требуется авторизация для источника.'
   }
-  if (/Connection refused|SocksHTTPSConnection|proxy/i.test(detail)) {
-    return 'Connection error'
+
+  if (/Connection refused|SocksHTTPSConnection|proxy|timed out|Failed to establish/i.test(detail)) {
+    return 'Ошибка сети или прокси.'
   }
+
+  if (/DRM|Widevine|protected content|copyright protection/i.test(detail)) {
+    return 'Видео защищено DRM и не может быть скачано.'
+  }
+
+  if (/Unsupported URL|No video formats found|404|not found/i.test(detail)) {
+    return 'Видео не найдено или ссылка не поддерживается.'
+  }
+
   if (/age.restricted/i.test(detail)) {
-    return 'Download failed'
+    return 'Контент недоступен без авторизации.'
   }
-  return 'Download failed'
+
+  return 'Ошибка загрузки.'
 }
 
 function cleanErrorMessage(error: string): string {

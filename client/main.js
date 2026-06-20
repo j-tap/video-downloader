@@ -32,14 +32,18 @@ form.onsubmit = async (e) => {
       body: JSON.stringify({ url })
     })
 
-    if (!res.ok) throw new Error('Failed to start download')
+    if (!res.ok) {
+      const error = await getResponseError(res)
+      logClientError('Download start API error', { url, status: res.status, error })
+      throw new Error(error || 'Failed to start download')
+    }
 
     const { id } = await res.json()
     activeDownloadId = id
     pollStatus(id)
   } catch (err) {
-    console.error('Download start failed:', err)
-    statusText.textContent = '❌ Download failed'
+    logClientError('Download start failed', { url }, err)
+    statusText.textContent = `❌ ${err.message || 'Download failed'}`
     setLoading(false)
   }
 }
@@ -52,13 +56,17 @@ cancelBtn.onclick = async () => {
 
   try {
     const res = await fetch(`/cancel/${activeDownloadId}`, { method: 'POST' })
-    if (!res.ok) throw new Error('Cancel failed')
+    if (!res.ok) {
+      const error = await getResponseError(res)
+      logClientError('Cancel API error', { id: activeDownloadId, status: res.status, error })
+      throw new Error(error || 'Cancel failed')
+    }
     stopPolling()
     resetProgress()
     statusText.textContent = '⏹ Download cancelled'
     setLoading(false)
   } catch (err) {
-    console.error('Cancel failed:', err)
+    logClientError('Cancel failed', { id: activeDownloadId }, err)
     statusText.textContent = '❌ Download failed'
     cancelBtn.disabled = false
   }
@@ -108,7 +116,11 @@ async function pollStatus(id) {
   pollInterval = setInterval(async () => {
     try {
       const res = await fetch(`/status/${id}`)
-      if (!res.ok) throw new Error('Status check failed')
+      if (!res.ok) {
+        const error = await getResponseError(res)
+        logClientError('Status API error', { id, status: res.status, error })
+        throw new Error(error || 'Status check failed')
+      }
 
       const { status, error, progress } = await res.json()
 
@@ -139,15 +151,16 @@ async function pollStatus(id) {
       }
 
       if (status === 'error') {
+        logClientError('Download processing error', { id, error, progress, status })
         stopPolling()
         resetProgress()
-        statusText.textContent = '❌ Download failed'
+        statusText.textContent = `❌ ${error || 'Download failed'}`
         setLoading(false)
       }
     } catch (err) {
       stopPolling()
       resetProgress()
-      console.error('Status check failed:', err)
+      logClientError('Status check failed', { id }, err)
       statusText.textContent = '❌ Download failed'
       setLoading(false)
     }
@@ -159,4 +172,22 @@ function triggerDownload(id) {
   a.href = `/file/${id}`
   a.download = 'video.mp4'
   a.click()
+}
+
+async function getResponseError(response) {
+  try {
+    const body = await response.json()
+    return body?.error
+  } catch {
+    return null
+  }
+}
+
+function logClientError(message, context = {}, error) {
+  if (error) {
+    console.error(`[video-downloader] ${message}`, context, error)
+    return
+  }
+
+  console.error(`[video-downloader] ${message}`, context)
 }
