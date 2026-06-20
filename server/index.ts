@@ -61,10 +61,10 @@ app.listen(port, () => {
 
   const cookies = getCookiesConfig()
   if (cookies.fromBrowser) {
-    console.log(`YouTube cookies: --cookies-from-browser ${cookies.fromBrowser}`)
+    console.log(`Cookies: --cookies-from-browser ${cookies.fromBrowser}`)
   } else if (cookies.file) {
-    console.log(`YouTube cookies: ${cookies.file}`)
+    console.log(`Cookies: ${cookies.file}`)
   } else {
-    console.warn('YouTube cookies: не настроены (data/cookiesYoutube.txt или YT_COOKIES_FILE)')
+    console.warn('Cookies: не настроены (data/cookies.txt или COOKIES_FILE)')
   }
 })

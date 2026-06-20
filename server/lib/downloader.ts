@@ -20,31 +20,35 @@ const processes = new Map<string, ChildProcess>()
 
 const YTDLP_BIN = process.env.YTDLP_PATH || 'yt-dlp'
 
-const COOKIES_CANDIDATES = [
+const DEFAULT_COOKIES_CANDIDATES = [
+  process.env.COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookies.txt'),
+  '/app/data/cookies.txt',
+].filter(Boolean) as string[]
+
+const YOUTUBE_COOKIES_CANDIDATES = [
   process.env.YT_COOKIES_FILE,
   path.join(process.cwd(), 'data', 'cookiesYoutube.txt'),
   '/app/data/cookiesYoutube.txt',
 ].filter(Boolean) as string[]
 
-let resolvedCookiesFile: string | null = null
+const KINOPUB_COOKIES_CANDIDATES = [
+  process.env.KINOPUB_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesKinoPub.txt'),
+  '/app/data/cookiesKinoPub.txt',
+].filter(Boolean) as string[]
 
-export function resolveCookiesFile(): string | null {
-  if (resolvedCookiesFile !== null) {
-    return resolvedCookiesFile || null
-  }
-
-  for (const candidate of COOKIES_CANDIDATES) {
+export function resolveCookiesFile(url?: string): string | null {
+  for (const candidate of getCookiesCandidates(url)) {
     const resolved = path.isAbsolute(candidate)
       ? candidate
       : path.resolve(process.cwd(), candidate)
 
     if (fs.existsSync(resolved)) {
-      resolvedCookiesFile = resolved
       return resolved
     }
   }
 
-  resolvedCookiesFile = ''
   return null
 }
 
@@ -53,7 +57,10 @@ export function getCookiesConfig(): {
   fromBrowser: string | null
   configured: boolean
 } {
-  const fromBrowser = process.env.YT_COOKIES_FROM_BROWSER?.trim() || null
+  const fromBrowser = process.env.COOKIES_FROM_BROWSER?.trim()
+    || process.env.YT_COOKIES_FROM_BROWSER?.trim()
+    || process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim()
+    || null
   const file = resolveCookiesFile()
 
   return {
@@ -141,7 +148,7 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
     '--fragment-retries', '5',
     ...getJsRuntimeArgs(),
     ...getProxyArgs(useProxy),
-    ...getCookiesArgs(id),
+    ...getCookiesArgs(id, url),
     ...getPlatformArgs(url, attempt),
     '-o', filePath,
     url,
@@ -184,13 +191,13 @@ function getTempCookiesPath(id: string): string {
   return path.join(tmpdir(), `cookies-${id}.txt`)
 }
 
-function getCookiesArgs(id: string): string[] {
-  const fromBrowser = process.env.YT_COOKIES_FROM_BROWSER?.trim()
+function getCookiesArgs(id: string, url: string): string[] {
+  const fromBrowser = getCookiesFromBrowser(url)
   if (fromBrowser) {
     return ['--cookies-from-browser', fromBrowser]
   }
 
-  const cookiesFile = resolveCookiesFile()
+  const cookiesFile = resolveCookiesFile(url)
   if (!cookiesFile) return []
 
   const tmpCookies = getTempCookiesPath(id)
@@ -200,6 +207,34 @@ function getCookiesArgs(id: string): string[] {
 
 function cleanupTempCookies(id: string): void {
   fs.unlink(getTempCookiesPath(id), () => {})
+}
+
+function getCookiesCandidates(url?: string): string[] {
+  if (!url) {
+    return [...DEFAULT_COOKIES_CANDIDATES, ...YOUTUBE_COOKIES_CANDIDATES, ...KINOPUB_COOKIES_CANDIDATES]
+  }
+
+  if (isYouTube(url)) {
+    return [...YOUTUBE_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
+  }
+
+  if (isKinoPub(url)) {
+    return [...KINOPUB_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
+  }
+
+  return DEFAULT_COOKIES_CANDIDATES
+}
+
+function getCookiesFromBrowser(url: string): string | null {
+  if (isYouTube(url)) {
+    return process.env.YT_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
+  }
+
+  if (isKinoPub(url)) {
+    return process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
+  }
+
+  return process.env.COOKIES_FROM_BROWSER?.trim() || null
 }
 
 function cleanupDownloadArtifacts(id: string): void {
@@ -218,20 +253,43 @@ function isCancelled(id: string): boolean {
 }
 
 function isYouTube(url: string): boolean {
-  return /youtube\.com|youtu\.be/.test(url)
+  return hasMatchingHostname(url, ['youtube.com', 'youtu.be'])
 }
 
 function isFacebook(url: string): boolean {
-  return /facebook\.com|fb\.com|fb\.watch/.test(url)
+  return hasMatchingHostname(url, ['facebook.com', 'fb.com', 'fb.watch'])
 }
 
 function isInstagram(url: string): boolean {
-  return /instagram\.com|instagr\.am/.test(url)
+  return hasMatchingHostname(url, ['instagram.com', 'instagr.am'])
+}
+
+function isKinoPub(url: string): boolean {
+  return hasMatchingHostname(url, ['kino.pub'])
+}
+
+function hasMatchingHostname(url: string, hosts: string[]): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    return hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`))
+  } catch {
+    return false
+  }
 }
 
 function getPlatformArgs(url: string, attempt: number): string[] {
   if (isYouTube(url)) {
     return getYouTubeArgs(attempt)
+  }
+
+  if (isKinoPub(url)) {
+    return [
+      '-f', 'bv*+ba/b',
+      '--merge-output-format', 'mp4',
+      '--remux-video', 'mp4',
+      '--add-header', 'Referer:https://kino.pub/',
+      '--postprocessor-args', 'ffmpeg:-movflags +faststart',
+    ]
   }
 
   if (isFacebook(url) || isInstagram(url)) {
