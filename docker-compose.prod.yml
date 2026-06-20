@@ -5,6 +5,7 @@ services:
     environment:
       NODE_ENV: production
       YT_COOKIES_FILE: ${YT_COOKIES_FILE:-/app/data/cookiesYoutube.txt}
+      KINOPUB_COOKIES_FILE: ${KINOPUB_COOKIES_FILE:-/app/data/cookiesKinoPub.txt}
     volumes:
       - ./data:/app/data:ro
     build:
