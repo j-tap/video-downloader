@@ -426,17 +426,69 @@ function runYtDlpProcess(
 }
 
 function verifyDownloadedFile(id: string, filePath: string, entry: DownloadEntry): boolean {
+  const resolvedFilePath = resolveDownloadedFilePath(filePath)
+  if (!resolvedFilePath) {
+    failDownload(id, entry, 'File not found after download')
+    return false
+  }
+
+  if (resolvedFilePath !== entry.filePath) {
+    console.log(`ℹ️  [${id}] Resolved output file: ${resolvedFilePath}`)
+    entry.filePath = resolvedFilePath
+  }
+
   try {
-    const stats = fs.statSync(filePath)
+    const stats = fs.statSync(entry.filePath)
     if (stats.size === 0) {
       failDownload(id, entry, 'Downloaded file is empty')
       return false
     }
     console.log(`✅  [${id}] Download complete (${(stats.size / 1024 / 1024).toFixed(2)} MB)`)
     return true
-  } catch {
-    failDownload(id, entry, 'File not found after download')
+  } catch (error) {
+    failDownload(id, entry, `Unable to read downloaded file: ${(error as Error).message}`)
     return false
+  }
+}
+
+function resolveDownloadedFilePath(expectedPath: string): string | null {
+  if (fs.existsSync(expectedPath)) {
+    return expectedPath
+  }
+
+  const dir = path.dirname(expectedPath)
+  const baseName = path.basename(expectedPath, path.extname(expectedPath))
+
+  try {
+    const candidates = fs.readdirSync(dir)
+      .filter((name) => name.startsWith(baseName))
+      .filter((name) => !name.endsWith('.part'))
+      .filter((name) => !name.endsWith('.ytdl'))
+      .map((name) => path.join(dir, name))
+      .filter((candidatePath) => {
+        try {
+          return fs.statSync(candidatePath).isFile()
+        } catch {
+          return false
+        }
+      })
+
+    if (candidates.length === 0) {
+      return null
+    }
+
+    candidates.sort((a, b) => {
+      const aStat = fs.statSync(a)
+      const bStat = fs.statSync(b)
+      if (aStat.size !== bStat.size) {
+        return bStat.size - aStat.size
+      }
+      return bStat.mtimeMs - aStat.mtimeMs
+    })
+
+    return candidates[0] || null
+  } catch {
+    return null
   }
 }
 
@@ -518,6 +570,10 @@ function getPublicErrorMessage(detail: string, url: string): string {
 
   if (/Unsupported URL|No video formats found|404|not found/i.test(detail)) {
     return 'Видео не найдено или ссылка не поддерживается.'
+  }
+
+  if (/File not found after download|Unable to read downloaded file|Downloaded file is empty/i.test(detail)) {
+    return 'Источник отдал некорректный файл. Повторите попытку или обновите cookies.'
   }
 
   if (/age.restricted/i.test(detail)) {
