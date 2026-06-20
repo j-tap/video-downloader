@@ -140,7 +140,7 @@ interface BuildOptions {
 function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
   const { attempt = 0, useProxy = true } = options
   const args = [
-    '--no-playlist',
+    ...getPlaylistArgs(url),
     '--no-warnings',
     '--newline',
     '--socket-timeout', '30',
@@ -155,6 +155,18 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
   ]
 
   return args
+}
+
+function getPlaylistArgs(url: string): string[] {
+  if (!isKinoPub(url)) {
+    return ['--no-playlist']
+  }
+
+  return [
+    '--yes-playlist',
+    '--reject-title', '(?i)(trailer|preview|тизер|трейлер)',
+    '--max-downloads', '1',
+  ]
 }
 
 function getJsRuntimeArgs(): string[] {
