@@ -568,6 +568,10 @@ function getPublicErrorMessage(detail: string, url: string): string {
     return 'Видео защищено DRM и не может быть скачано.'
   }
 
+  if (/Postprocessing|ffmpeg|Conversion failed|Error opening output files|Invalid data found/i.test(detail)) {
+    return 'Ошибка обработки видео (ffmpeg/postprocessing). Проверьте исходный поток и попробуйте снова.'
+  }
+
   if (/Unsupported URL|No video formats found|404|not found/i.test(detail)) {
     return 'Видео не найдено или ссылка не поддерживается.'
   }
@@ -578,6 +582,15 @@ function getPublicErrorMessage(detail: string, url: string): string {
 
   if (/age.restricted/i.test(detail)) {
     return 'Контент недоступен без авторизации.'
+  }
+
+  const normalized = detail
+    .replace(/^ERROR:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (normalized) {
+    return `Ошибка загрузки: ${normalized.slice(0, 220)}`
   }
 
   return 'Ошибка загрузки.'
@@ -604,7 +617,8 @@ function cleanErrorMessage(error: string): string {
     if (line.includes('Retrying')) continue
     if (line.includes('SocksHTTPSConnection') && line.includes('object at')) continue
     if (line.includes('ERROR:') ||
-        (line.includes('WARNING:') && /Unable to download|timed out|Failed to extract|PO Token|reloaded/i.test(line))) {
+        (line.includes('WARNING:') && /Unable to download|timed out|Failed to extract|PO Token|reloaded|Postprocessing|ffmpeg|Conversion failed/i.test(line)) ||
+        /Conversion failed|Postprocessing|Error opening output files|Invalid data found/i.test(line)) {
       importantLines.push(line)
     }
   }
