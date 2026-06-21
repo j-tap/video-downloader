@@ -164,6 +164,7 @@ function getPlaylistArgs(url: string): string[] {
 
   return [
     '--yes-playlist',
+    '--ignore-errors',
     '--reject-title', '(?i)(trailer|preview|тизер|трейлер)',
     '--max-downloads', '1',
   ]
@@ -412,6 +413,16 @@ function runYtDlpProcess(
         cleanupDownloadArtifacts(id)
         return
       }
+      entry.status = 'done'
+      scheduleCleanup(entry)
+      cleanupTempCookies(id)
+      return
+    }
+
+    // Some extractors can return non-zero for playlist side-errors
+    // even when the target file is already downloaded correctly.
+    if (verifyDownloadedFile(id, filePath, entry)) {
+      console.warn(`⚠️  [${id}] yt-dlp exited with code ${code}, but file is valid. Marking as done.`)
       entry.status = 'done'
       scheduleCleanup(entry)
       cleanupTempCookies(id)
