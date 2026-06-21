@@ -44,6 +44,7 @@ bun run dev
 
 - `KINOPUB_COOKIES_FILE` или `data/cookiesKinoPub.txt`
 - `KINOPUB_COOKIES_FROM_BROWSER` (например `chrome`)
+- Если страница `item/view/...` отдает только трейлер, используй прямую `m3u8` ссылку full-видео из Network в браузере
 
 ### Общий fallback
 

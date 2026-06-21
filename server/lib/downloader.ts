@@ -127,6 +127,15 @@ function normalizeUrl(url: string): string {
 
 function runDownloadProcess(url: string, filePath: string, id: string): void {
   const target = resolveDownloadTarget(url, id)
+  if (target.trailerOnly) {
+    const entry = downloads.get(id)
+    if (entry) {
+      failDownload(id, entry, 'kino.pub returned only trailer stream for this page')
+    }
+    cleanupDownloadArtifacts(id)
+    return
+  }
+
   console.log(`▶️  [${id}] Starting download: ${target.url}`)
   if (target.playlistItemIndex) {
     console.log(`ℹ️  [${id}] kino.pub selected playlist item: ${target.playlistItemIndex}`)
@@ -195,16 +204,17 @@ interface YtDlpProbeEntry {
 interface ResolvedDownloadTarget {
   url: string
   playlistItemIndex: number | null
+  trailerOnly: boolean
 }
 
 function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget {
   if (!isKinoPub(url)) {
-    return { url, playlistItemIndex: null }
+    return { url, playlistItemIndex: null, trailerOnly: false }
   }
 
   const selected = resolveKinoPubMainEntry(url, id)
   if (!selected) {
-    return { url, playlistItemIndex: null }
+    return { url, playlistItemIndex: null, trailerOnly: false }
   }
 
   return selected
@@ -242,6 +252,19 @@ function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarge
     : []
 
   if (entries.length === 0) {
+    const formats = Array.isArray((json as { formats?: unknown }).formats)
+      ? ((json as { formats: unknown[] }).formats as Array<{ url?: string; manifest_url?: string }>)
+      : []
+
+    const urls = formats
+      .flatMap((format) => [format.url, format.manifest_url])
+      .filter(Boolean) as string[]
+
+    const hasTrailerOnly = urls.length > 0 && urls.every((candidateUrl) => isTrailerStreamUrl(candidateUrl))
+    if (hasTrailerOnly) {
+      return { url, playlistItemIndex: null, trailerOnly: true }
+    }
+
     return null
   }
 
@@ -260,6 +283,7 @@ function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarge
   return {
     url,
     playlistItemIndex: selected.index,
+    trailerOnly: false,
   }
 }
 
@@ -337,7 +361,7 @@ function getCookiesCandidates(url?: string): string[] {
     return [...YOUTUBE_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
   }
 
-  if (isKinoPub(url)) {
+  if (isKinoPubRelated(url)) {
     return [...KINOPUB_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
   }
 
@@ -349,7 +373,7 @@ function getCookiesFromBrowser(url: string): string | null {
     return process.env.YT_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
   }
 
-  if (isKinoPub(url)) {
+  if (isKinoPubRelated(url)) {
     return process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
   }
 
@@ -396,17 +420,32 @@ function hasMatchingHostname(url: string, hosts: string[]): boolean {
   }
 }
 
+function isKinoPubRelated(url: string): boolean {
+  return isKinoPub(url) || hasMatchingHostname(url, ['cdntogo.net'])
+}
+
+function isTrailerStreamUrl(url: string): boolean {
+  return /\/trailers?\//i.test(url)
+}
+
+function getKinoPubHeaderArgs(): string[] {
+  return [
+    '--add-header', 'Referer:https://kino.pub/',
+    '--add-header', 'Origin:https://kino.pub',
+  ]
+}
+
 function getPlatformArgs(url: string, attempt: number): string[] {
   if (isYouTube(url)) {
     return getYouTubeArgs(attempt)
   }
 
-  if (isKinoPub(url)) {
+  if (isKinoPubRelated(url)) {
     return [
       '-f', 'bv*+ba/b',
       '--merge-output-format', 'mp4',
       '--remux-video', 'mp4',
-      '--add-header', 'Referer:https://kino.pub/',
+      ...getKinoPubHeaderArgs(),
       '--postprocessor-args', 'ffmpeg:-movflags +faststart',
     ]
   }
@@ -674,7 +713,11 @@ function failDownload(id: string, entry: DownloadEntry, logSummary: string, code
 }
 
 function getPublicErrorMessage(detail: string, url: string): string {
-  if (isKinoPub(url) && /authoriz|login|sign in|403|forbidden|unauthorized|access denied|cookies/i.test(detail)) {
+  if (/only trailer stream/i.test(detail)) {
+    return 'Для этой страницы kino.pub доступен только трейлер. Вставьте прямую ссылку на full m3u8 из Network.'
+  }
+
+  if (isKinoPubRelated(url) && /authoriz|login|sign in|403|forbidden|unauthorized|access denied|cookies/i.test(detail)) {
     const hasCookies = Boolean(getCookiesFromBrowser(url) || resolveCookiesFile(url))
     if (!hasCookies) {
       return 'kino.pub требует авторизацию: добавьте KINOPUB_COOKIES_FILE (data/cookiesKinoPub.txt) или KINOPUB_COOKIES_FROM_BROWSER.'
@@ -700,10 +743,6 @@ function getPublicErrorMessage(detail: string, url: string): string {
 
   if (/Unsupported URL|No video formats found|404|not found/i.test(detail)) {
     return 'Видео не найдено или ссылка не поддерживается.'
-  }
-
-  if (/No video.*match(es)? the filter|does not pass filter|match-filter/i.test(detail)) {
-    return 'Похоже, найден только трейлер. Полная версия не прошла фильтр длительности.'
   }
 
   if (/File not found after download|Unable to read downloaded file|Downloaded file is empty/i.test(detail)) {
