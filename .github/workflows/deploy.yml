@@ -24,7 +24,24 @@ jobs:
       - name: Pull code & rebuild containers
         run: |
           ssh -p ${{ secrets.VPS_PORT }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
+            set -euo pipefail
             cd ${{ secrets.VPS_PROJECT_PATH }}
             git pull origin main
             make prod
+
+            source .env
+            CONTAINER_ID=$(docker compose -p "$APP_NAME" --env-file .env -f docker-compose.prod.yml -f docker-compose.traefik.yml ps -q downloadervr9pro)
+            if [ -z "$CONTAINER_ID" ]; then
+              echo "Deploy verification failed: container for service downloadervr9pro not found"
+              exit 1
+            fi
+
+            TRAEFIK_ENABLED=$(docker inspect -f '{{ index .Config.Labels "traefik.enable" }}' "$CONTAINER_ID")
+            TRAEFIK_RULE=$(docker inspect -f '{{ index .Config.Labels "traefik.http.routers.downloadervr9pro.rule" }}' "$CONTAINER_ID")
+            if [ "$TRAEFIK_ENABLED" != "true" ] || [ -z "$TRAEFIK_RULE" ]; then
+              echo "Deploy verification failed: traefik labels are missing on deployed container"
+              echo "traefik.enable=$TRAEFIK_ENABLED"
+              echo "traefik.rule=$TRAEFIK_RULE"
+              exit 1
+            fi
           EOF

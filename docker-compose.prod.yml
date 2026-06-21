@@ -1,3 +1,5 @@
+name: ${APP_NAME:-downloadervr9pro}
+
 services:
   downloadervr9pro:
     ports: []
