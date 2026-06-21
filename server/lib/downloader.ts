@@ -207,9 +207,21 @@ interface ResolvedDownloadTarget {
   trailerOnly: boolean
 }
 
+interface KinoPubPlaylistItem {
+  manifest?: string
+  season?: number
+  episode?: number
+}
+
 function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget {
   if (!isKinoPub(url)) {
     return { url, playlistItemIndex: null, trailerOnly: false }
+  }
+
+  const manifestFromPage = resolveKinoPubManifestFromPage(url, id)
+  if (manifestFromPage) {
+    console.log(`ℹ️  [${id}] kino.pub selected manifest from PLAYER_PLAYLIST`)
+    return { url: manifestFromPage, playlistItemIndex: null, trailerOnly: false }
   }
 
   const selected = resolveKinoPubMainEntry(url, id)
@@ -285,6 +297,89 @@ function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarge
     playlistItemIndex: selected.index,
     trailerOnly: false,
   }
+}
+
+function resolveKinoPubManifestFromPage(url: string, id: string): string | null {
+  const html = fetchKinoPubPageHtml(url, id)
+  if (!html) return null
+
+  const playlist = extractPlayerPlaylist(html)
+  if (playlist.length === 0) return null
+
+  const pageEpisode = parseSeasonEpisodeFromUrl(url)
+  if (pageEpisode) {
+    const exact = playlist.find((item) => item.season === pageEpisode.season && item.episode === pageEpisode.episode)
+    if (exact?.manifest && !isTrailerStreamUrl(exact.manifest)) {
+      return exact.manifest
+    }
+  }
+
+  const startIndex = extractPlayerStartIndex(html)
+  if (startIndex !== null) {
+    const byStartIndex = playlist[startIndex]
+    if (byStartIndex?.manifest && !isTrailerStreamUrl(byStartIndex.manifest)) {
+      return byStartIndex.manifest
+    }
+  }
+
+  const firstNonTrailer = playlist.find((item) => item.manifest && !isTrailerStreamUrl(item.manifest))
+  return firstNonTrailer?.manifest || null
+}
+
+function fetchKinoPubPageHtml(url: string, id: string): string | null {
+  const cookiesFile = resolveCookiesFile(url)
+  if (!cookiesFile) {
+    console.warn(`⚠️  [${id}] kino.pub page parse skipped: cookies file not found`)
+    return null
+  }
+
+  const curlArgs = [
+    '-fsSL',
+    '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    '-e', 'https://kino.pub/',
+    '-b', cookiesFile,
+    url,
+  ]
+
+  const result = spawnSync('curl', curlArgs, {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  })
+
+  if (result.status !== 0 || !result.stdout?.trim()) {
+    console.warn(`⚠️  [${id}] kino.pub page parse failed, fallback to extractor preflight`)
+    return null
+  }
+
+  return result.stdout
+}
+
+function extractPlayerPlaylist(html: string): KinoPubPlaylistItem[] {
+  const match = html.match(/window\.PLAYER_PLAYLIST\s*=\s*(\[[\s\S]*?\]);/)
+  if (!match?.[1]) return []
+
+  const parsed = tryParseJson(match[1])
+  if (!Array.isArray(parsed)) return []
+  return parsed as KinoPubPlaylistItem[]
+}
+
+function extractPlayerStartIndex(html: string): number | null {
+  const match = html.match(/window\.PLAYER_START_INDEX\s*=\s*(\d+)\s*;/)
+  if (!match?.[1]) return null
+
+  const parsed = Number.parseInt(match[1], 10)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function parseSeasonEpisodeFromUrl(url: string): { season: number; episode: number } | null {
+  const match = url.match(/\/s(\d+)e(\d+)/i)
+  if (!match?.[1] || !match[2]) return null
+
+  const season = Number.parseInt(match[1], 10)
+  const episode = Number.parseInt(match[2], 10)
+  if (!Number.isFinite(season) || !Number.isFinite(episode)) return null
+
+  return { season, episode }
 }
 
 function isTrailerEntry(entry: YtDlpProbeEntry): boolean {
