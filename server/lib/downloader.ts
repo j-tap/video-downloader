@@ -126,22 +126,26 @@ function normalizeUrl(url: string): string {
 }
 
 function runDownloadProcess(url: string, filePath: string, id: string): void {
-  const targetUrl = resolveDownloadTargetUrl(url, id)
-  console.log(`▶️  [${id}] Starting download: ${targetUrl}`)
+  const target = resolveDownloadTarget(url, id)
+  console.log(`▶️  [${id}] Starting download: ${target.url}`)
+  if (target.playlistItemIndex) {
+    console.log(`ℹ️  [${id}] kino.pub selected playlist item: ${target.playlistItemIndex}`)
+  }
 
-  const args = buildYtDlpArgs(targetUrl, filePath, id, { attempt: 0 })
-  runYtDlpProcess(args, id, filePath, { url: targetUrl, filePath, attempt: 0, useProxy: true })
+  const args = buildYtDlpArgs(target.url, filePath, id, { attempt: 0, playlistItemIndex: target.playlistItemIndex })
+  runYtDlpProcess(args, id, filePath, { url: target.url, filePath, attempt: 0, useProxy: true, playlistItemIndex: target.playlistItemIndex })
 }
 
 interface BuildOptions {
   attempt?: number
   useProxy?: boolean
+  playlistItemIndex?: number | null
 }
 
 function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
-  const { attempt = 0, useProxy = true } = options
+  const { attempt = 0, useProxy = true, playlistItemIndex = null } = options
   const args = [
-    ...getPlaylistArgs(url),
+    ...getPlaylistArgs(url, playlistItemIndex),
     '--no-warnings',
     '--newline',
     '--socket-timeout', '30',
@@ -158,9 +162,17 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
   return args
 }
 
-function getPlaylistArgs(url: string): string[] {
+function getPlaylistArgs(url: string, playlistItemIndex: number | null): string[] {
   if (!isKinoPub(url)) {
     return ['--no-playlist']
+  }
+
+  if (playlistItemIndex) {
+    return [
+      '--yes-playlist',
+      '--ignore-errors',
+      '--playlist-items', String(playlistItemIndex),
+    ]
   }
 
   return [
@@ -173,29 +185,32 @@ function getPlaylistArgs(url: string): string[] {
 
 interface YtDlpProbeEntry {
   title?: string
+  description?: string
+  id?: string
   duration?: number
   webpage_url?: string
   url?: string
 }
 
-function resolveDownloadTargetUrl(url: string, id: string): string {
+interface ResolvedDownloadTarget {
+  url: string
+  playlistItemIndex: number | null
+}
+
+function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget {
   if (!isKinoPub(url)) {
-    return url
+    return { url, playlistItemIndex: null }
   }
 
-  const selected = resolveKinoPubMainUrl(url, id)
+  const selected = resolveKinoPubMainEntry(url, id)
   if (!selected) {
-    return url
-  }
-
-  if (selected !== url) {
-    console.log(`ℹ️  [${id}] kino.pub selected main entry: ${selected}`)
+    return { url, playlistItemIndex: null }
   }
 
   return selected
 }
 
-function resolveKinoPubMainUrl(url: string, id: string): string | null {
+function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarget | null {
   const probeArgs = [
     '--dump-single-json',
     '--skip-download',
@@ -230,20 +245,26 @@ function resolveKinoPubMainUrl(url: string, id: string): string | null {
     return null
   }
 
-  const nonTrailer = entries.filter((entry) => !isTrailerEntry(entry))
-  const pool = nonTrailer.length > 0 ? nonTrailer : entries
-  const withDuration = pool.filter((entry) => typeof entry.duration === 'number' && entry.duration > 0)
+  const entriesWithIndex = entries.map((entry, index) => ({ entry, index: index + 1 }))
+  const nonTrailer = entriesWithIndex.filter(({ entry }) => !isTrailerEntry(entry))
+  const pool = nonTrailer.length > 0 ? nonTrailer : entriesWithIndex
+  const withDuration = pool.filter(({ entry }) => typeof entry.duration === 'number' && entry.duration > 0)
 
   const sorted = (withDuration.length > 0 ? withDuration : pool)
     .slice()
-    .sort((a, b) => (b.duration || 0) - (a.duration || 0))
+    .sort((a, b) => (b.entry.duration || 0) - (a.entry.duration || 0))
 
   const selected = sorted[0]
-  return selected?.webpage_url || selected?.url || null
+  if (!selected) return null
+
+  return {
+    url,
+    playlistItemIndex: selected.index,
+  }
 }
 
 function isTrailerEntry(entry: YtDlpProbeEntry): boolean {
-  const marker = `${entry.title || ''}`.toLowerCase()
+  const marker = `${entry.title || ''} ${entry.description || ''} ${entry.id || ''} ${entry.url || ''} ${entry.webpage_url || ''}`.toLowerCase()
   return /(trailer|preview|тизер|трейлер|анонс)/i.test(marker)
 }
 
@@ -446,6 +467,7 @@ interface RunContext {
   filePath: string
   attempt: number
   useProxy: boolean
+  playlistItemIndex: number | null
 }
 
 function runYtDlpProcess(
@@ -603,7 +625,11 @@ function tryRetry(
 
   if (hasProxy && isProxyError) {
     console.log(`⚠️  [${id}] Proxy error, retrying without proxy...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { attempt: ctx.attempt, useProxy: false })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
+      attempt: ctx.attempt,
+      useProxy: false,
+      playlistItemIndex: ctx.playlistItemIndex,
+    })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useProxy: false })
     return true
   }
@@ -611,7 +637,11 @@ function tryRetry(
   if (isYouTubeError && ctx.attempt < 2 && !process.env.YT_PLAYER_CLIENT) {
     const nextAttempt = ctx.attempt + 1
     console.log(`⚠️  [${id}] YouTube error, retrying with fallback player_client (attempt ${nextAttempt})...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { attempt: nextAttempt, useProxy: ctx.useProxy })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
+      attempt: nextAttempt,
+      useProxy: ctx.useProxy,
+      playlistItemIndex: ctx.playlistItemIndex,
+    })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, attempt: nextAttempt })
     return true
   }
@@ -670,6 +700,10 @@ function getPublicErrorMessage(detail: string, url: string): string {
 
   if (/Unsupported URL|No video formats found|404|not found/i.test(detail)) {
     return 'Видео не найдено или ссылка не поддерживается.'
+  }
+
+  if (/No video.*match(es)? the filter|does not pass filter|match-filter/i.test(detail)) {
+    return 'Похоже, найден только трейлер. Полная версия не прошла фильтр длительности.'
   }
 
   if (/File not found after download|Unable to read downloaded file|Downloaded file is empty/i.test(detail)) {
