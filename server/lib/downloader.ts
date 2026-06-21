@@ -126,10 +126,11 @@ function normalizeUrl(url: string): string {
 }
 
 function runDownloadProcess(url: string, filePath: string, id: string): void {
-  console.log(`▶️  [${id}] Starting download: ${url}`)
+  const targetUrl = resolveDownloadTargetUrl(url, id)
+  console.log(`▶️  [${id}] Starting download: ${targetUrl}`)
 
-  const args = buildYtDlpArgs(url, filePath, id, { attempt: 0 })
-  runYtDlpProcess(args, id, filePath, { url, filePath, attempt: 0, useProxy: true })
+  const args = buildYtDlpArgs(targetUrl, filePath, id, { attempt: 0 })
+  runYtDlpProcess(args, id, filePath, { url: targetUrl, filePath, attempt: 0, useProxy: true })
 }
 
 interface BuildOptions {
@@ -168,6 +169,90 @@ function getPlaylistArgs(url: string): string[] {
     '--reject-title', '(?i)(trailer|preview|тизер|трейлер)',
     '--max-downloads', '1',
   ]
+}
+
+interface YtDlpProbeEntry {
+  title?: string
+  duration?: number
+  webpage_url?: string
+  url?: string
+}
+
+function resolveDownloadTargetUrl(url: string, id: string): string {
+  if (!isKinoPub(url)) {
+    return url
+  }
+
+  const selected = resolveKinoPubMainUrl(url, id)
+  if (!selected) {
+    return url
+  }
+
+  if (selected !== url) {
+    console.log(`ℹ️  [${id}] kino.pub selected main entry: ${selected}`)
+  }
+
+  return selected
+}
+
+function resolveKinoPubMainUrl(url: string, id: string): string | null {
+  const probeArgs = [
+    '--dump-single-json',
+    '--skip-download',
+    '--yes-playlist',
+    '--no-warnings',
+    ...getJsRuntimeArgs(),
+    ...getProxyArgs(true),
+    ...getCookiesArgs(id, url),
+    url,
+  ]
+
+  const probe = spawnSync(YTDLP_BIN, probeArgs, {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  })
+
+  if (probe.status !== 0 || !probe.stdout?.trim()) {
+    console.warn(`⚠️  [${id}] kino.pub preflight failed, using original URL`)
+    return null
+  }
+
+  const json = tryParseJson(probe.stdout)
+  if (!json || typeof json !== 'object') {
+    return null
+  }
+
+  const entries = Array.isArray((json as { entries?: unknown }).entries)
+    ? ((json as { entries: unknown[] }).entries as YtDlpProbeEntry[])
+    : []
+
+  if (entries.length === 0) {
+    return null
+  }
+
+  const nonTrailer = entries.filter((entry) => !isTrailerEntry(entry))
+  const pool = nonTrailer.length > 0 ? nonTrailer : entries
+  const withDuration = pool.filter((entry) => typeof entry.duration === 'number' && entry.duration > 0)
+
+  const sorted = (withDuration.length > 0 ? withDuration : pool)
+    .slice()
+    .sort((a, b) => (b.duration || 0) - (a.duration || 0))
+
+  const selected = sorted[0]
+  return selected?.webpage_url || selected?.url || null
+}
+
+function isTrailerEntry(entry: YtDlpProbeEntry): boolean {
+  const marker = `${entry.title || ''}`.toLowerCase()
+  return /(trailer|preview|тизер|трейлер|анонс)/i.test(marker)
+}
+
+function tryParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
 }
 
 function getJsRuntimeArgs(): string[] {
