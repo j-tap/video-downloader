@@ -38,6 +38,18 @@ const KINOPUB_COOKIES_CANDIDATES = [
   '/app/data/cookiesKinoPub.txt',
 ].filter(Boolean) as string[]
 
+const INSTAGRAM_COOKIES_CANDIDATES = [
+  process.env.INSTAGRAM_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesInstagram.txt'),
+  '/app/data/cookiesInstagram.txt',
+].filter(Boolean) as string[]
+
+const FACEBOOK_COOKIES_CANDIDATES = [
+  process.env.FACEBOOK_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesFacebook.txt'),
+  '/app/data/cookiesFacebook.txt',
+].filter(Boolean) as string[]
+
 export function resolveCookiesFile(url?: string): string | null {
   for (const candidate of getCookiesCandidates(url)) {
     const resolved = path.isAbsolute(candidate)
@@ -60,6 +72,8 @@ export function getCookiesConfig(): {
   const fromBrowser = process.env.COOKIES_FROM_BROWSER?.trim()
     || process.env.YT_COOKIES_FROM_BROWSER?.trim()
     || process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim()
+    || process.env.INSTAGRAM_COOKIES_FROM_BROWSER?.trim()
+    || process.env.FACEBOOK_COOKIES_FROM_BROWSER?.trim()
     || null
   const file = resolveCookiesFile()
 
@@ -120,9 +134,22 @@ function getTempFilePath(id: string): string {
 }
 
 function normalizeUrl(url: string): string {
-  return url
+  const normalized = url
     .replace(/youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/, 'youtube.com/watch?v=$1')
     .replace(/youtu\.be\/([a-zA-Z0-9_-]+)/, 'youtube.com/watch?v=$1')
+
+  try {
+    const parsed = new URL(normalized)
+    if (isInstagram(parsed.href) || isFacebook(parsed.href)) {
+      parsed.search = ''
+      parsed.hash = ''
+      return parsed.toString()
+    }
+  } catch {
+    return normalized
+  }
+
+  return normalized
 }
 
 function runDownloadProcess(url: string, filePath: string, id: string): void {
@@ -449,7 +476,13 @@ function cleanupTempCookies(id: string): void {
 
 function getCookiesCandidates(url?: string): string[] {
   if (!url) {
-    return [...DEFAULT_COOKIES_CANDIDATES, ...YOUTUBE_COOKIES_CANDIDATES, ...KINOPUB_COOKIES_CANDIDATES]
+    return [
+      ...DEFAULT_COOKIES_CANDIDATES,
+      ...YOUTUBE_COOKIES_CANDIDATES,
+      ...KINOPUB_COOKIES_CANDIDATES,
+      ...INSTAGRAM_COOKIES_CANDIDATES,
+      ...FACEBOOK_COOKIES_CANDIDATES,
+    ]
   }
 
   if (isYouTube(url)) {
@@ -458,6 +491,14 @@ function getCookiesCandidates(url?: string): string[] {
 
   if (isKinoPubRelated(url)) {
     return [...KINOPUB_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
+  }
+
+  if (isInstagram(url)) {
+    return [...INSTAGRAM_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
+  }
+
+  if (isFacebook(url)) {
+    return [...FACEBOOK_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
   }
 
   return DEFAULT_COOKIES_CANDIDATES
@@ -470,6 +511,14 @@ function getCookiesFromBrowser(url: string): string | null {
 
   if (isKinoPubRelated(url)) {
     return process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
+  }
+
+  if (isInstagram(url)) {
+    return process.env.INSTAGRAM_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
+  }
+
+  if (isFacebook(url)) {
+    return process.env.FACEBOOK_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
   }
 
   return process.env.COOKIES_FROM_BROWSER?.trim() || null
@@ -818,6 +867,14 @@ function getPublicErrorMessage(detail: string, url: string): string {
       return 'kino.pub требует авторизацию: добавьте KINOPUB_COOKIES_FILE (data/cookiesKinoPub.txt) или KINOPUB_COOKIES_FROM_BROWSER.'
     }
     return 'kino.pub не принял cookies: обновите cookiesKinoPub.txt (экспорт из браузера с активной сессией).'
+  }
+
+  if (isInstagram(url) && /login|sign in|cookies|private|403|forbidden|unauthorized/i.test(detail)) {
+    return 'Instagram требует авторизацию: укажите INSTAGRAM_COOKIES_FILE или INSTAGRAM_COOKIES_FROM_BROWSER.'
+  }
+
+  if (isFacebook(url) && /login|sign in|cookies|private|403|forbidden|unauthorized/i.test(detail)) {
+    return 'Facebook требует авторизацию: укажите FACEBOOK_COOKIES_FILE или FACEBOOK_COOKIES_FROM_BROWSER.'
   }
 
   if (/Sign in to confirm/i.test(detail)) {

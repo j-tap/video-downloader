@@ -51,6 +51,12 @@ bun run dev
 - `COOKIES_FILE` или `data/cookies.txt`
 - `COOKIES_FROM_BROWSER`
 
+### Instagram / Facebook
+
+- `INSTAGRAM_COOKIES_FILE` / `INSTAGRAM_COOKIES_FROM_BROWSER`
+- `FACEBOOK_COOKIES_FILE` / `FACEBOOK_COOKIES_FROM_BROWSER`
+- Для ссылок Instagram/Facebook автоматически убираются трекинг-параметры (`utm_*`, `igsh` и т.п.)
+
 Все cookie-файлы должны быть в формате Netscape.
 
 ## Полезные переменные окружения
