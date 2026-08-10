@@ -3,6 +3,8 @@ import path from 'path'
 import { tmpdir } from 'os'
 import crypto from 'crypto'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
+import { formatBytes, formatDuration, limits } from './config'
+import { isPublicUrlSync } from './security/urlGuard'
 
 type Status = 'pending' | 'done' | 'error' | 'cancelled'
 
@@ -11,12 +13,25 @@ export interface DownloadEntry {
   url: string
   filePath: string
   status: Status
+  /** Кто запустил загрузку — только он получает статус и файл */
+  clientId: string
+  /** IP используется для лимитов: cookie можно сбросить, адрес — сложнее */
+  ip: string
+  createdAt: number
   error?: string
   progress?: number
 }
 
+export type StartDownloadResult =
+  | { ok: true; id: string }
+  | { ok: false; status: number; error: string }
+
 const downloads = new Map<string, DownloadEntry>()
 const processes = new Map<string, ChildProcess>()
+const watchdogs = new Map<string, ReturnType<typeof setInterval>>()
+const timeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+const SIZE_CHECK_INTERVAL_MS = 15_000
 
 const YTDLP_BIN = process.env.YTDLP_PATH || 'yt-dlp'
 
@@ -84,45 +99,272 @@ export function getCookiesConfig(): {
   }
 }
 
-export function getDownloadStatus(id: string): DownloadEntry | undefined {
-  return downloads.get(id)
+/**
+ * Запись отдаётся только владельцу: id — это capability-токен,
+ * но привязка к клиенту закрывает и подбор, и утечку id через логи/реферер.
+ */
+export function getDownloadStatus(id: string, clientId: string): DownloadEntry | undefined {
+  const entry = downloads.get(id)
+  if (!entry || entry.clientId !== clientId) return undefined
+  return entry
 }
 
-export function verifyYtDlp(): { ok: boolean; version?: string; error?: string } {
+export function verifyYtDlp(): { ok: boolean; version?: string; error?: string; ageDays?: number } {
   const result = spawnSync(YTDLP_BIN, ['--version'], { encoding: 'utf8' })
   if (result.status !== 0) {
     return { ok: false, error: result.stderr?.trim() || 'yt-dlp not found' }
   }
-  return { ok: true, version: result.stdout?.trim() }
+
+  const version = result.stdout?.trim()
+  return { ok: true, version, ageDays: getYtDlpAgeDays(version) }
 }
 
-export function downloadVideo(url: string): string {
+/**
+ * Версия yt-dlp — это дата релиза (2026.07.04). Устаревший бинарник
+ * в собранном образе — самая частая причина «часть видео не скачивается»:
+ * экстракторы ломаются вслед за изменениями на стороне YouTube.
+ */
+function getYtDlpAgeDays(version?: string): number | undefined {
+  const match = version?.match(/^(\d{4})\.(\d{2})\.(\d{2})/)
+  if (!match) return undefined
+
+  const released = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  return Math.floor((Date.now() - released) / 86_400_000)
+}
+
+export interface DownloadOwner {
+  clientId: string
+  ip: string
+}
+
+export function startDownload(url: string, owner: DownloadOwner): StartDownloadResult {
+  const rejection = checkCapacity(owner.ip)
+  if (rejection) return rejection
+
   const id = generateId()
   const filePath = getTempFilePath(id)
 
-  const entry: DownloadEntry = { id, url, filePath, status: 'pending' }
+  const entry: DownloadEntry = {
+    id,
+    url,
+    filePath,
+    status: 'pending',
+    clientId: owner.clientId,
+    ip: owner.ip,
+    createdAt: Date.now(),
+  }
   downloads.set(id, entry)
+
+  armDownloadTimeout(id)
+  startSizeWatchdog(id)
 
   runDownloadProcess(normalizeUrl(url), filePath, id)
 
-  return id
+  return { ok: true, id }
 }
 
-export function cancelDownload(id: string): boolean {
+/** Возвращает причину отказа или null, если можно стартовать. */
+function checkCapacity(ip: string): Extract<StartDownloadResult, { ok: false }> | null {
+  const active = [...downloads.values()].filter((entry) => entry.status === 'pending')
+
+  if (active.length >= limits.maxConcurrentDownloads) {
+    return {
+      ok: false,
+      status: 503,
+      error: 'Сервер сейчас занят другими загрузками. Попробуйте через несколько минут.',
+    }
+  }
+
+  const activeForClient = active.filter((entry) => entry.ip === ip).length
+  if (activeForClient >= limits.maxConcurrentPerClient) {
+    return {
+      ok: false,
+      status: 429,
+      error: 'У вас уже идёт загрузка. Дождитесь её завершения или отмените.',
+    }
+  }
+
+  if (getUsedStorageBytes() >= limits.maxTotalStorageBytes) {
+    return {
+      ok: false,
+      status: 503,
+      error: 'На сервере закончилось место для временных файлов. Попробуйте позже.',
+    }
+  }
+
+  return null
+}
+
+/**
+ * Суммарный объём наших временных файлов (включая недокачанные .part
+ * и осиротевшие после перезапуска) — одним чтением каталога.
+ */
+function getUsedStorageBytes(): number {
+  const dir = tmpdir()
+
+  try {
+    return fs.readdirSync(dir)
+      .filter((name) => matchOwnTempFile(name) !== null)
+      .reduce((sum, name) => {
+        try {
+          return sum + fs.statSync(path.join(dir, name)).size
+        } catch {
+          return sum
+        }
+      }, 0)
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * После падения или рестарта в tmp остаются файлы, которые никто уже не заберёт.
+ * Без этой уборки они бессрочно занимают место и съедают квоту.
+ */
+export function cleanupOrphanedFiles(): number {
+  const dir = tmpdir()
+  let removed = 0
+
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      const id = matchOwnTempFile(name)
+      if (!id || downloads.has(id)) continue
+
+      try {
+        fs.unlinkSync(path.join(dir, name))
+        removed += 1
+      } catch {
+        // файл могли удалить параллельно — не мешает
+      }
+    }
+  } catch {
+    return removed
+  }
+
+  return removed
+}
+
+/**
+ * Наши файлы называются строго `video-<uuid>...` и `cookies-<uuid>.txt`.
+ * Проверка по UUID нужна, чтобы не тронуть чужое в общем /tmp.
+ */
+const OWN_TEMP_FILE = /^(?:video|cookies)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.|$)/i
+
+function matchOwnTempFile(name: string): string | null {
+  return name.match(OWN_TEMP_FILE)?.[1] ?? null
+}
+
+/** Размер всех файлов, которые yt-dlp создал под этот id (mp4, .part, .f137.mp4 и т.д.). */
+function getDownloadBytes(id: string, filePath: string): number {
+  const dir = path.dirname(filePath)
+  const prefix = `video-${id}`
+
+  try {
+    return fs.readdirSync(dir)
+      .filter((name) => name.startsWith(prefix))
+      .reduce((sum, name) => {
+        try {
+          return sum + fs.statSync(path.join(dir, name)).size
+        } catch {
+          return sum
+        }
+      }, 0)
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * --max-filesize не работает для HLS/фрагментированных потоков,
+ * поэтому размер контролируем сами и убиваем процесс при превышении.
+ */
+function startSizeWatchdog(id: string): void {
+  const timer = setInterval(() => {
+    const entry = downloads.get(id)
+    if (!entry || entry.status !== 'pending') {
+      stopSizeWatchdog(id)
+      return
+    }
+
+    const bytes = getDownloadBytes(id, entry.filePath)
+    if (bytes > limits.maxDownloadBytes) {
+      console.warn(`⚠️  [${id}] Size limit exceeded (${formatBytes(bytes)}), killing process`)
+      abortDownload(id, `Файл превышает лимит ${formatBytes(limits.maxDownloadBytes)}.`)
+    }
+  }, SIZE_CHECK_INTERVAL_MS)
+
+  timer.unref?.()
+  watchdogs.set(id, timer)
+}
+
+function stopSizeWatchdog(id: string): void {
+  const timer = watchdogs.get(id)
+  if (timer) clearInterval(timer)
+  watchdogs.delete(id)
+}
+
+function armDownloadTimeout(id: string): void {
+  const timer = setTimeout(() => {
+    const entry = downloads.get(id)
+    if (!entry || entry.status !== 'pending') return
+
+    console.warn(`⚠️  [${id}] Download timed out after ${limits.downloadTimeoutMs / 60_000} min`)
+    abortDownload(id, 'Превышено время загрузки. Попробуйте ссылку на видео покороче.')
+  }, limits.downloadTimeoutMs)
+
+  timer.unref?.()
+  timeouts.set(id, timer)
+}
+
+function clearDownloadTimeout(id: string): void {
+  const timer = timeouts.get(id)
+  if (timer) clearTimeout(timer)
+  timeouts.delete(id)
+}
+
+/** Принудительное завершение загрузки сервером (лимит размера/времени). */
+function abortDownload(id: string, message: string): void {
   const entry = downloads.get(id)
-  if (!entry || entry.status !== 'pending') return false
+  if (!entry) return
+
+  killProcess(id)
+
+  entry.status = 'error'
+  entry.error = message
+
+  cleanupDownloadArtifacts(id)
+  scheduleEntryRemoval(id)
+}
+
+function killProcess(id: string): void {
+  const child = processes.get(id)
+  if (child && !child.killed) {
+    child.kill('SIGTERM')
+    // Если yt-dlp не завершился по SIGTERM (например, висит ffmpeg) — добиваем.
+    const killTimer = setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL')
+    }, 5000)
+    killTimer.unref?.()
+  }
+}
+
+export function cancelDownload(id: string, clientId: string): boolean {
+  const entry = downloads.get(id)
+  if (!entry || entry.clientId !== clientId || entry.status !== 'pending') return false
 
   entry.status = 'cancelled'
   console.log(`⏹️  [${id}] Download cancelled`)
 
-  const child = processes.get(id)
-  if (child && !child.killed) {
-    child.kill('SIGTERM')
-  }
+  killProcess(id)
 
   cleanupDownloadArtifacts(id)
-  setTimeout(() => downloads.delete(id), 60_000)
+  scheduleEntryRemoval(id)
   return true
+}
+
+function scheduleEntryRemoval(id: string, delayMs = 60_000): void {
+  const timer = setTimeout(() => downloads.delete(id), delayMs)
+  timer.unref?.()
 }
 
 function generateId(): string {
@@ -134,22 +376,58 @@ function getTempFilePath(id: string): string {
 }
 
 function normalizeUrl(url: string): string {
-  const normalized = url
-    .replace(/youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/, 'youtube.com/watch?v=$1')
-    .replace(/youtu\.be\/([a-zA-Z0-9_-]+)/, 'youtube.com/watch?v=$1')
-
+  let parsed: URL
   try {
-    const parsed = new URL(normalized)
-    if (isInstagram(parsed.href) || isFacebook(parsed.href)) {
-      parsed.search = ''
-      parsed.hash = ''
-      return parsed.toString()
-    }
+    parsed = new URL(url)
   } catch {
-    return normalized
+    return url
   }
 
-  return normalized
+  if (isYouTube(parsed.href)) {
+    return normalizeYouTubeUrl(parsed)
+  }
+
+  if (isInstagram(parsed.href) || isFacebook(parsed.href)) {
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString()
+  }
+
+  return parsed.toString()
+}
+
+const YOUTUBE_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/
+
+/**
+ * Приводим все формы ссылки к /watch?v=ID и отбрасываем трекинг.
+ * Строковая замена по подстроке этого не умела: `youtu.be/ID?si=xxx`
+ * превращался в `watch?v=ID?si=xxx`.
+ */
+function normalizeYouTubeUrl(parsed: URL): string {
+  const videoId = extractYouTubeId(parsed)
+  if (!videoId) return parsed.toString()
+
+  return `https://www.youtube.com/watch?v=${videoId}`
+}
+
+function extractYouTubeId(parsed: URL): string | null {
+  const segments = parsed.pathname.split('/').filter(Boolean)
+
+  // youtu.be/<id>
+  if (parsed.hostname.toLowerCase().endsWith('youtu.be')) {
+    return matchYouTubeId(segments[0])
+  }
+
+  // /shorts/<id>, /live/<id>, /embed/<id>, /v/<id>
+  if (segments.length >= 2 && ['shorts', 'live', 'embed', 'v'].includes(segments[0] || '')) {
+    return matchYouTubeId(segments[1])
+  }
+
+  return matchYouTubeId(parsed.searchParams.get('v') || undefined)
+}
+
+function matchYouTubeId(value?: string): string | null {
+  return value && YOUTUBE_ID_PATTERN.test(value) ? value : null
 }
 
 function runDownloadProcess(url: string, filePath: string, id: string): void {
@@ -187,6 +465,7 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
     '--socket-timeout', '30',
     '--retries', '5',
     '--fragment-retries', '5',
+    ...getLimitArgs(),
     ...getJsRuntimeArgs(),
     ...getProxyArgs(useProxy),
     ...getCookiesArgs(id, url),
@@ -196,6 +475,18 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
   ]
 
   return args
+}
+
+/**
+ * Лимиты на стороне yt-dlp. Работают не для всех источников
+ * (например --max-filesize неизвестен для HLS), поэтому дублируются watchdog-ом.
+ */
+function getLimitArgs(): string[] {
+  return [
+    '--max-filesize', String(limits.maxDownloadBytes),
+    // `<?` — пропускать, если поле отсутствует (часто у прямых m3u8)
+    '--match-filter', `duration<?${limits.maxDurationSeconds}`,
+  ]
 }
 
 function getPlaylistArgs(url: string, playlistItemIndex: number | null): string[] {
@@ -246,7 +537,9 @@ function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget 
   }
 
   const manifestFromPage = resolveKinoPubManifestFromPage(url, id)
-  if (manifestFromPage) {
+  if (manifestFromPage && !isPublicUrlSync(manifestFromPage)) {
+    console.warn(`⛔ [${id}] Manifest URL from page rejected: ${manifestFromPage}`)
+  } else if (manifestFromPage) {
     console.log(`ℹ️  [${id}] kino.pub selected manifest from PLAYER_PLAYLIST`)
     return { url: manifestFromPage, playlistItemIndex: null, trailerOnly: false }
   }
@@ -362,6 +655,12 @@ function fetchKinoPubPageHtml(url: string, id: string): string | null {
 
   const curlArgs = [
     '-fsSL',
+    // Ограничиваем, куда и как долго может уйти запрос со страницы
+    '--proto', '=http,https',
+    '--proto-redir', '=http,https',
+    '--max-redirs', '3',
+    '--max-time', '25',
+    '--max-filesize', '10485760',
     '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     '-e', 'https://kino.pub/',
     '-b', cookiesFile,
@@ -526,12 +825,29 @@ function getCookiesFromBrowser(url: string): string | null {
 
 function cleanupDownloadArtifacts(id: string): void {
   cleanupTempCookies(id)
+  stopSizeWatchdog(id)
+  clearDownloadTimeout(id)
   processes.delete(id)
 
   const entry = downloads.get(id)
   if (!entry) return
 
-  fs.unlink(entry.filePath, () => {})
+  removeDownloadFiles(id, entry.filePath)
+}
+
+/** Удаляем все файлы, созданные под этот id, включая .part и промежуточные форматы. */
+function removeDownloadFiles(id: string, filePath: string): void {
+  const dir = path.dirname(filePath)
+  const prefix = `video-${id}`
+
+  fs.readdir(dir, (error, names) => {
+    if (error) return
+    for (const name of names) {
+      if (name.startsWith(prefix)) {
+        fs.unlink(path.join(dir, name), () => {})
+      }
+    }
+  })
 }
 
 function isCancelled(id: string): boolean {
@@ -638,11 +954,18 @@ function getYouTubePlayerClient(attempt: number): string | null {
 
   const hasCookies = getCookiesConfig().configured
 
-  const fallbacks = hasCookies
-    ? ['web,web_safari', 'mweb,android_vr', 'android,web']
-    : [null, 'mweb,android_vr,web_safari', 'android,web']
+  // Первая попытка — без переопределения: набор клиентов по умолчанию
+  // в yt-dlp обновляется вместе с изменениями YouTube и работает лучше всего.
+  // Клиент `android` сюда не входит намеренно: он молча отдаёт только 360p.
+  const fallbacks: Array<string | null> = hasCookies
+    ? [null, 'android_vr,mweb', 'web,web_safari']
+    : [null, 'android_vr,mweb,web_safari', 'tv_simply,ios']
 
-  return fallbacks[attempt] ?? fallbacks[fallbacks.length - 1]!
+  const index = Math.min(Math.max(attempt, 0), fallbacks.length - 1)
+
+  // Важно: именно индексный доступ, а не `??` по значению —
+  // null на первой попытке означает "не переопределять", а не "нет значения".
+  return fallbacks[index] ?? null
 }
 
 interface RunContext {
@@ -664,6 +987,9 @@ function runYtDlpProcess(
   const child = spawn(YTDLP_BIN, args)
   processes.set(id, child)
   const stderrChunks: string[] = []
+  // yt-dlp сообщает о срабатывании --max-filesize/--match-filter в stdout
+  // и завершается с кодом 0, поэтому такие строки собираем отдельно.
+  const noticeChunks: string[] = []
 
   const handleOutput = (message: string) => {
     if (isCancelled(id)) return
@@ -678,6 +1004,9 @@ function runYtDlpProcess(
   child.stdout.on('data', (data) => {
     const message = data.toString()
     console.log(`yt-dlp stdout [${id}]:`, message)
+    if (/larger than max-filesize|does not pass filter/i.test(message)) {
+      noticeChunks.push(message)
+    }
     handleOutput(message)
   })
 
@@ -698,39 +1027,42 @@ function runYtDlpProcess(
 
     const logSummary = stderrChunks.join('').trim()
 
-    if (code === 0) {
-      if (!verifyDownloadedFile(id, filePath, entry)) {
-        cleanupDownloadArtifacts(id)
-        return
+    // Некоторые экстракторы возвращают ненулевой код из-за побочных ошибок плейлиста,
+    // хотя нужный файл уже скачан корректно — поэтому сначала проверяем файл.
+    const verified = verifyDownloadedFile(id, filePath, entry)
+
+    if (verified.ok) {
+      if (code !== 0) {
+        console.warn(`⚠️  [${id}] yt-dlp exited with code ${code}, but file is valid. Marking as done.`)
       }
       entry.status = 'done'
       scheduleCleanup(entry)
       cleanupTempCookies(id)
+      stopSizeWatchdog(id)
+      clearDownloadTimeout(id)
       return
     }
 
-    // Some extractors can return non-zero for playlist side-errors
-    // even when the target file is already downloaded correctly.
-    if (verifyDownloadedFile(id, filePath, entry)) {
-      console.warn(`⚠️  [${id}] yt-dlp exited with code ${code}, but file is valid. Marking as done.`)
-      entry.status = 'done'
-      scheduleCleanup(entry)
-      cleanupTempCookies(id)
-      return
-    }
-
+    // Ретрай не должен переводить запись в error — иначе клиент увидит ошибку
+    // и перестанет опрашивать статус, пока следующая попытка ещё идёт.
     if (tryRetry(id, filePath, entry, logSummary, ctx)) return
 
-    failDownload(id, entry, logSummary, code ?? undefined)
+    const notice = noticeChunks.join('').trim()
+    failDownload(id, entry, logSummary || notice || verified.reason, code ?? undefined)
     cleanupDownloadArtifacts(id)
+    scheduleEntryRemoval(id, 5 * 60_000)
   })
 }
 
-function verifyDownloadedFile(id: string, filePath: string, entry: DownloadEntry): boolean {
+interface VerifyResult {
+  ok: boolean
+  reason: string
+}
+
+function verifyDownloadedFile(id: string, filePath: string, entry: DownloadEntry): VerifyResult {
   const resolvedFilePath = resolveDownloadedFilePath(filePath)
   if (!resolvedFilePath) {
-    failDownload(id, entry, 'File not found after download')
-    return false
+    return { ok: false, reason: 'File not found after download' }
   }
 
   if (resolvedFilePath !== entry.filePath) {
@@ -741,14 +1073,12 @@ function verifyDownloadedFile(id: string, filePath: string, entry: DownloadEntry
   try {
     const stats = fs.statSync(entry.filePath)
     if (stats.size === 0) {
-      failDownload(id, entry, 'Downloaded file is empty')
-      return false
+      return { ok: false, reason: 'Downloaded file is empty' }
     }
     console.log(`✅  [${id}] Download complete (${(stats.size / 1024 / 1024).toFixed(2)} MB)`)
-    return true
+    return { ok: true, reason: '' }
   } catch (error) {
-    failDownload(id, entry, `Unable to read downloaded file: ${(error as Error).message}`)
-    return false
+    return { ok: false, reason: `Unable to read downloaded file: ${(error as Error).message}` }
   }
 }
 
@@ -765,6 +1095,10 @@ function resolveDownloadedFilePath(expectedPath: string): string | null {
       .filter((name) => name.startsWith(baseName))
       .filter((name) => !name.endsWith('.part'))
       .filter((name) => !name.endsWith('.ytdl'))
+      // video-<id>.f137.mp4 — это отдельная дорожка до merge.
+      // Без этого фильтра после неудачной попытки можно отдать
+      // пользователю файл только со звуком или только с видео.
+      .filter((name) => !/\.f\d+\./.test(name))
       .map((name) => path.join(dir, name))
       .filter((candidatePath) => {
         try {
@@ -833,10 +1167,12 @@ function tryRetry(
 }
 
 function scheduleCleanup(entry: DownloadEntry): void {
-  setTimeout(() => {
-    fs.unlink(entry.filePath, () => {})
+  const timer = setTimeout(() => {
+    removeDownloadFiles(entry.id, entry.filePath)
     downloads.delete(entry.id)
-  }, 5 * 60 * 1000)
+  }, limits.fileTtlMs)
+
+  timer.unref?.()
 }
 
 function parseProgress(message: string): number | null {
@@ -857,6 +1193,14 @@ function failDownload(id: string, entry: DownloadEntry, logSummary: string, code
 }
 
 function getPublicErrorMessage(detail: string, url: string): string {
+  if (/larger than max-filesize/i.test(detail)) {
+    return `Видео больше лимита ${formatBytes(limits.maxDownloadBytes)}.`
+  }
+
+  if (/does not pass filter/i.test(detail)) {
+    return `Видео длиннее лимита в ${formatDuration(limits.maxDurationSeconds)}.`
+  }
+
   if (/only trailer stream/i.test(detail)) {
     return 'Для этой страницы kino.pub доступен только трейлер. Вставьте прямую ссылку на full m3u8 из Network.'
   }

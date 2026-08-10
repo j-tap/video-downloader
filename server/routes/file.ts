@@ -6,7 +6,7 @@ export function fileHandler(req: Request, res: Response) {
   const id = req.params.id
   if (!id) return res.status(400).json({ error: 'Missing ID' })
 
-  const entry = getDownloadStatus(id)
+  const entry = getDownloadStatus(id, req.clientId)
   if (!entry || entry.status !== 'done') {
     return res.status(404).json({ error: 'File not ready' })
   }
@@ -20,15 +20,17 @@ export function fileHandler(req: Request, res: Response) {
   res.setHeader('Content-Type', 'video/mp4')
   res.setHeader('Content-Disposition', `attachment; filename="video-${new Date().getTime()}.mp4"`)
   res.setHeader('Accept-Ranges', 'bytes')
-  
+
   // Отправляем файл
   const fileStream = fs.createReadStream(entry.filePath)
   fileStream.pipe(res)
-  
+
   fileStream.on('error', (err) => {
     console.error('Error streaming file:', err)
     if (!res.headersSent) {
       res.status(500).json({ error: 'Error reading file' })
     }
   })
+
+  res.on('close', () => fileStream.destroy())
 }

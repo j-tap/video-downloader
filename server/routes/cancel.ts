@@ -5,7 +5,7 @@ export function cancelHandler(req: Request, res: Response) {
   const id = req.params.id
   if (!id) return res.status(400).json({ error: 'Missing ID' })
 
-  const cancelled = cancelDownload(id)
+  const cancelled = cancelDownload(id, req.clientId)
   if (!cancelled) return res.status(404).json({ error: 'Not found or not active' })
 
   res.json({ status: 'cancelled' })

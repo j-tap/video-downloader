@@ -4,7 +4,9 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import 'dotenv/config'
 import { registerRoutes } from './routes'
-import { getCookiesConfig, verifyYtDlp } from './lib/downloader'
+import { cleanupOrphanedFiles, getCookiesConfig, verifyYtDlp } from './lib/downloader'
+import { clientIdMiddleware } from './lib/security/clientId'
+import { limits } from './lib/config'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -12,8 +14,28 @@ const __dirname = path.dirname(__filename)
 const port = process.env.PORT || 3000
 const app = express()
 
-app.use(cors())
-app.use(express.json())
+// За Traefik реальный IP приходит в X-Forwarded-For — без этого
+// rate limit считал бы всех пользователей одним клиентом.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1))
+app.disable('x-powered-by')
+
+/**
+ * CORS: по умолчанию запрещаем кросс-доменные вызовы — UI живёт на том же origin.
+ * CORS_ORIGINS=https://a.com,https://b.com включает точечный allowlist.
+ */
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
+app.use(cors({
+  origin: corsOrigins.length > 0 ? corsOrigins : false,
+  credentials: corsOrigins.length > 0,
+}))
+
+app.use(express.json({ limit: '16kb' }))
+app.use(securityHeaders)
+app.use(clientIdMiddleware)
 
 // Статические файлы из папки client (должно быть первым)
 const clientPath = path.join(__dirname, '../client')
@@ -47,6 +69,15 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(clientPath, 'index.html'))
 })
 
+function securityHeaders(_req: express.Request, res: express.Response, next: express.NextFunction) {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()')
+  next()
+}
+
 const ytDlp = verifyYtDlp()
 if (!ytDlp.ok) {
   console.error(`❌ yt-dlp unavailable: ${ytDlp.error}`)
@@ -54,10 +85,27 @@ if (!ytDlp.ok) {
   process.exit(1)
 }
 
+const orphans = cleanupOrphanedFiles()
+if (orphans > 0) {
+  console.log(`🧹 Удалено осиротевших временных файлов: ${orphans}`)
+}
+
 app.listen(port, () => {
   console.log(`Server started on http://localhost:${port}`)
   console.log(`yt-dlp ${ytDlp.version}`)
+  if (ytDlp.ageDays !== undefined && ytDlp.ageDays > 45) {
+    console.warn(
+      `⚠️  yt-dlp собран ${ytDlp.ageDays} дней назад — экстракторы могли устареть. `
+      + 'Пересоберите образ: make rebuild',
+    )
+  }
   console.log(`Client path: ${clientPath}`)
+  console.log(
+    `Limits: ${limits.maxConcurrentDownloads} параллельно, `
+    + `${(limits.maxDownloadBytes / 1024 ** 3).toFixed(1)} GB на файл, `
+    + `${(limits.maxTotalStorageBytes / 1024 ** 3).toFixed(1)} GB всего, `
+    + `таймаут ${limits.downloadTimeoutMs / 60_000} мин`,
+  )
 
   const cookies = getCookiesConfig()
   if (cookies.fromBrowser) {
