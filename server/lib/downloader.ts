@@ -537,7 +537,10 @@ function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget 
   }
 
   const manifestFromPage = resolveKinoPubManifestFromPage(url, id)
-  if (manifestFromPage && !isPublicUrlSync(manifestFromPage)) {
+  // Манифест приходит со страницы kino.pub и лежит на её CDN — белый список
+  // здесь не применяем, иначе смена CDN-хоста ломает загрузку. Схема, порт
+  // и запрет приватных адресов проверяются как обычно.
+  if (manifestFromPage && !isPublicUrlSync(manifestFromPage, { enforceAllowlist: false })) {
     console.warn(`⛔ [${id}] Manifest URL from page rejected: ${manifestFromPage}`)
   } else if (manifestFromPage) {
     console.log(`ℹ️  [${id}] kino.pub selected manifest from PLAYER_PLAYLIST`)

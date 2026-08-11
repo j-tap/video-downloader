@@ -9,6 +9,16 @@ export interface UrlGuardResult {
   detail?: string
 }
 
+export interface UrlGuardOptions {
+  /**
+   * Проверять хост по белому списку площадок.
+   * Выключается только для ссылок, добытых со страницы уже разрешённой площадки
+   * (манифесты kino.pub живут на меняющихся CDN-хостах) — проверки схемы,
+   * порта и приватных адресов при этом остаются.
+   */
+  enforceAllowlist?: boolean
+}
+
 const MAX_URL_LENGTH = 2048
 const DNS_TIMEOUT_MS = 5000
 
@@ -36,14 +46,43 @@ const BLOCKED_HOSTNAME_SUFFIXES = [
   'localdomain',
 ]
 
-/** Опциональный allowlist: ALLOWED_HOSTS=youtube.com,kino.pub (пусто/`*` — разрешено всё публичное). */
-const ALLOWED_HOSTS = (process.env.ALLOWED_HOSTS || '')
+/**
+ * Площадки, которые сервис действительно умеет качать (см. getPlatformArgs в downloader).
+ * Всё остальное отсекается до запуска yt-dlp: без этого списка сервер работает
+ * как открытый прокси и по анонимной ссылке ходит куда угодно, включая docker-сеть.
+ */
+export const SUPPORTED_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'youtube-nocookie.com',
+  'instagram.com',
+  'instagr.am',
+  'facebook.com',
+  'fb.com',
+  'fb.watch',
+  'kino.pub',
+  'cdntogo.net',
+] as const
+
+/** Человекочитаемый список для сообщения об ошибке */
+const SUPPORTED_PLATFORMS_TEXT = 'YouTube, Instagram, Facebook, kino.pub'
+
+/**
+ * ALLOWED_HOSTS=youtube.com,kino.pub — заменить список своим.
+ * ALLOWED_HOSTS=* — выключить белый список (остаются проверки схемы, порта
+ * и приватных адресов). Пусто — список площадок по умолчанию.
+ */
+const allowedHostsEnv = (process.env.ALLOWED_HOSTS || '')
   .split(',')
   .map((host) => host.trim().toLowerCase().replace(/^\./, ''))
-  .filter((host) => host && host !== '*')
+  .filter(Boolean)
 
-export async function assertPublicUrl(rawUrl: string): Promise<UrlGuardResult> {
-  const syncCheck = checkUrlSync(rawUrl)
+const ALLOWED_HOSTS: readonly string[] = allowedHostsEnv.includes('*')
+  ? []
+  : (allowedHostsEnv.length > 0 ? allowedHostsEnv : SUPPORTED_HOSTS)
+
+export async function assertPublicUrl(rawUrl: string, options: UrlGuardOptions = {}): Promise<UrlGuardResult> {
+  const syncCheck = checkUrlSync(rawUrl, options)
   if (!syncCheck.ok) return syncCheck
 
   const hostname = normalizeHostname(new URL(rawUrl.trim()).hostname)
@@ -60,11 +99,13 @@ export async function assertPublicUrl(rawUrl: string): Promise<UrlGuardResult> {
  * Синхронная часть проверки — без DNS. Используется для ссылок,
  * которые мы достаём из страниц источника (манифесты kino.pub).
  */
-export function isPublicUrlSync(rawUrl: string): boolean {
-  return checkUrlSync(rawUrl).ok
+export function isPublicUrlSync(rawUrl: string, options: UrlGuardOptions = {}): boolean {
+  return checkUrlSync(rawUrl, options).ok
 }
 
-function checkUrlSync(rawUrl: string): UrlGuardResult {
+function checkUrlSync(rawUrl: string, options: UrlGuardOptions = {}): UrlGuardResult {
+  const { enforceAllowlist = true } = options
+
   if (typeof rawUrl !== 'string' || rawUrl.trim() === '') {
     return { ok: false, error: 'Не указана ссылка.' }
   }
@@ -112,11 +153,11 @@ function checkUrlSync(rawUrl: string): UrlGuardResult {
     if (!hostnameCheck.ok) return hostnameCheck
   }
 
-  if (ALLOWED_HOSTS.length > 0 && !matchesAllowlist(hostname)) {
+  if (enforceAllowlist && ALLOWED_HOSTS.length > 0 && !matchesAllowlist(hostname)) {
     return {
       ok: false,
-      error: 'Этот сайт не разрешён на сервере.',
-      detail: `host ${hostname} not in ALLOWED_HOSTS`,
+      error: `Этот сайт не поддерживается. Доступны: ${SUPPORTED_PLATFORMS_TEXT}.`,
+      detail: `host ${hostname} not in allowlist`,
     }
   }
 

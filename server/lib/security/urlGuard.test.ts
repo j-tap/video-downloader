@@ -23,9 +23,14 @@ describe('assertPublicUrl', () => {
     ['внутренняя зона .internal', 'http://mailcow.internal/'],
     ['внутренняя зона .local', 'http://prometheus.local/'],
     ['credentials для подмены хоста', 'http://user:pass@evil.com@127.0.0.1/'],
-    ['нестандартный порт', 'https://example.com:8080/'],
+    ['нестандартный порт', 'https://youtube.com:8080/'],
     ['схема file', 'file:///etc/passwd'],
-    ['схема ftp', 'ftp://example.com/x'],
+    ['схема ftp', 'ftp://youtube.com/x'],
+    ['посторонний сайт', 'https://example.com/video.mp4'],
+    ['посторонний сайт по http', 'http://example.com/video'],
+    ['неподдерживаемая площадка', 'https://vimeo.com/76979871'],
+    ['похожий домен-обманка', 'https://youtube.com.evil.tld/watch?v=x'],
+    ['площадка как путь, а не хост', 'https://evil.tld/youtube.com/watch'],
   ] as const
 
   for (const [name, url] of blocked) {
@@ -40,8 +45,10 @@ describe('assertPublicUrl', () => {
     'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
     'https://youtu.be/dQw4w9WgXcQ',
     'https://www.instagram.com/reel/abc/',
-    'https://vimeo.com/76979871',
-    'http://example.com/video',
+    'https://www.facebook.com/watch/?v=123',
+    'https://fb.watch/abc/',
+    'https://kino.pub/item/view/123',
+    'https://cdn.cdntogo.net/x/master.m3u8',
   ]
 
   for (const url of allowed) {
@@ -56,17 +63,31 @@ describe('assertPublicUrl', () => {
   })
 
   test('слишком длинный URL отклоняется', async () => {
-    expect((await assertPublicUrl(`https://example.com/${'a'.repeat(3000)}`)).ok).toBe(false)
+    expect((await assertPublicUrl(`https://youtube.com/${'a'.repeat(3000)}`)).ok).toBe(false)
+  })
+
+  test('в тексте ошибки перечислены поддерживаемые площадки', async () => {
+    const result = await assertPublicUrl('https://example.com/video.mp4')
+    expect(result.error).toContain('YouTube')
+    expect(result.error).toContain('kino.pub')
   })
 })
 
 describe('isPublicUrlSync', () => {
   test('манифест с внутреннего адреса не принимается', () => {
-    expect(isPublicUrlSync('http://10.1.2.3/master.m3u8')).toBe(false)
+    expect(isPublicUrlSync('http://10.1.2.3/master.m3u8', { enforceAllowlist: false })).toBe(false)
   })
 
   test('обычный CDN-манифест принимается', () => {
     expect(isPublicUrlSync('https://cdn.cdntogo.net/x/master.m3u8')).toBe(true)
+  })
+
+  test('манифест со стороннего CDN проходит без белого списка', () => {
+    expect(isPublicUrlSync('https://other-cdn.example/x/master.m3u8', { enforceAllowlist: false })).toBe(true)
+  })
+
+  test('но белый список по умолчанию такой хост не пропускает', () => {
+    expect(isPublicUrlSync('https://other-cdn.example/x/master.m3u8')).toBe(false)
   })
 })
 

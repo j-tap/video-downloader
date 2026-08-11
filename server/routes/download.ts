@@ -13,7 +13,7 @@ export async function downloadHandler(req: Request, res: Response) {
   const guard = await assertPublicUrl(url)
   if (!guard.ok) {
     console.warn(`⛔ Blocked URL from ${getClientIp(req)}: ${guard.detail || guard.error}`)
-    return res.status(403).json({ error: guard.error })
+    return res.status(400).json({ error: guard.error })
   }
 
   const result = startDownload(url.trim(), {
