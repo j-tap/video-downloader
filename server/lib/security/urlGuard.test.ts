@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test'
-import { assertPublicUrl, isPublicUrlSync } from './urlGuard'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { assertPublicUrl, checkRedirectChain, isPublicUrlSync } from './urlGuard'
 import { isPrivateIp } from './ip'
 
 describe('assertPublicUrl', () => {
@@ -117,4 +117,76 @@ describe('isPrivateIp', () => {
       expect(isPrivateIp(ip)).toBe(expected)
     })
   }
+})
+
+describe('checkRedirectChain', () => {
+  const realFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  /** Отдаёт ответы по порядку вызовов; строка = Location для 302. */
+  function mockFetch(responses: Array<string | number | Error>) {
+    const calls: string[] = []
+    let index = 0
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      calls.push(String(input))
+      const next = responses[index++] ?? 200
+
+      if (next instanceof Error) throw next
+      if (typeof next === 'number') return new Response(null, { status: next })
+      return new Response(null, { status: 302, headers: { location: next } })
+    }) as typeof fetch
+
+    return calls
+  }
+
+  test('редирект на метаданные облака блокируется', async () => {
+    mockFetch(['http://169.254.169.254/latest/meta-data/'])
+    const result = await checkRedirectChain('https://www.youtube.com/watch?v=x')
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('внутренний адрес')
+  })
+
+  test('редирект во внутреннюю docker-сеть блокируется', async () => {
+    mockFetch(['http://172.20.0.17:9090/api/v1/label/__name__/values'])
+    expect((await checkRedirectChain('https://www.youtube.com/watch?v=x')).ok).toBe(false)
+  })
+
+  test('блокируется и на втором шаге цепочки', async () => {
+    mockFetch(['https://youtu.be/abc', 'http://10.0.0.5/'])
+    expect((await checkRedirectChain('https://www.youtube.com/watch?v=x')).ok).toBe(false)
+  })
+
+  test('относительный Location разбирается относительно текущего URL', async () => {
+    const calls = mockFetch(['/watch?v=abc', 200])
+    const result = await checkRedirectChain('https://www.youtube.com/x')
+
+    expect(result.ok).toBe(true)
+    expect(calls[1]).toBe('https://www.youtube.com/watch?v=abc')
+  })
+
+  test('обычный редирект на публичный хост пропускается', async () => {
+    mockFetch(['https://www.youtube.com/watch?v=abc', 200])
+    expect((await checkRedirectChain('https://youtu.be/abc')).ok).toBe(true)
+  })
+
+  test('ответ без редиректа пропускается', async () => {
+    mockFetch([200])
+    expect((await checkRedirectChain('https://www.youtube.com/watch?v=x')).ok).toBe(true)
+  })
+
+  test('сетевая ошибка не блокирует загрузку', async () => {
+    mockFetch([new Error('ECONNREFUSED')])
+    expect((await checkRedirectChain('https://www.youtube.com/watch?v=x')).ok).toBe(true)
+  })
+
+  test('бесконечный цикл редиректов обрывается', async () => {
+    const calls = mockFetch(Array<string>(20).fill('https://www.youtube.com/loop'))
+    expect((await checkRedirectChain('https://www.youtube.com/loop')).ok).toBe(true)
+    expect(calls.length).toBe(5)
+  })
 })

@@ -10,7 +10,9 @@ export async function downloadHandler(req: Request, res: Response) {
     return res.status(400).json({ error: 'Не указана ссылка.' })
   }
 
-  const guard = await assertPublicUrl(url)
+  // checkRedirects: разрешённый хост может ответить редиректом на 169.254.169.254,
+  // а yt-dlp пойдёт по нему сам — поэтому цепочку проходим заранее.
+  const guard = await assertPublicUrl(url, { checkRedirects: true })
   if (!guard.ok) {
     console.warn(`⛔ Blocked URL from ${getClientIp(req)}: ${guard.detail || guard.error}`)
     return res.status(400).json({ error: guard.error })

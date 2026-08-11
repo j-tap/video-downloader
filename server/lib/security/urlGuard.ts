@@ -17,10 +17,20 @@ export interface UrlGuardOptions {
    * порта и приватных адресов при этом остаются.
    */
   enforceAllowlist?: boolean
+  /**
+   * Пройти по цепочке редиректов и проверить каждый шаг.
+   * yt-dlp и curl следуют за редиректами сами, поэтому разрешённый хост,
+   * отвечающий `302 Location: http://169.254.169.254/`, обходит проверку хоста.
+   */
+  checkRedirects?: boolean
 }
 
 const MAX_URL_LENGTH = 2048
 const DNS_TIMEOUT_MS = 5000
+const REDIRECT_TIMEOUT_MS = 5000
+const MAX_REDIRECT_HOPS = 5
+const REDIRECT_PROBE_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
 
 /** Порты, на которые разрешено ходить. Всё остальное — почти всегда внутренний сервис. */
 const ALLOWED_PORTS = new Set(
@@ -85,14 +95,81 @@ export async function assertPublicUrl(rawUrl: string, options: UrlGuardOptions =
   const syncCheck = checkUrlSync(rawUrl, options)
   if (!syncCheck.ok) return syncCheck
 
-  const hostname = normalizeHostname(new URL(rawUrl.trim()).hostname)
+  const url = rawUrl.trim()
+  const hostname = normalizeHostname(new URL(url).hostname)
 
   if (!isIpLiteral(hostname)) {
     const dnsCheck = await checkDnsResolvesToPublic(hostname)
     if (!dnsCheck.ok) return dnsCheck
   }
 
+  if (options.checkRedirects) {
+    return checkRedirectChain(url)
+  }
+
   return { ok: true }
+}
+
+/**
+ * Проходим цепочку редиректов сами и проверяем каждый переход.
+ * Сетевые ошибки не считаем поводом для отказа: ссылку всё равно будет
+ * тянуть yt-dlp, и он вернёт понятную ошибку, если хост недоступен.
+ */
+export async function checkRedirectChain(startUrl: string): Promise<UrlGuardResult> {
+  let current = startUrl
+
+  for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop += 1) {
+    const location = await peekRedirectLocation(current)
+    if (!location) return { ok: true }
+
+    let next: string
+    try {
+      next = new URL(location, current).toString()
+    } catch {
+      return { ok: false, error: 'Сайт вернул некорректный редирект.', detail: `bad location ${location}` }
+    }
+
+    // Белый список к промежуточным хостам не применяем: площадки штатно
+    // редиректят на свои CDN. Важно только, чтобы это не был внутренний адрес.
+    const hopCheck = await assertPublicUrl(next, { enforceAllowlist: false })
+    if (!hopCheck.ok) {
+      return {
+        ok: false,
+        error: 'Ссылка перенаправляет на внутренний адрес.',
+        detail: `redirect ${current} -> ${next}: ${hopCheck.detail || hopCheck.error}`,
+      }
+    }
+
+    current = next
+  }
+
+  return { ok: true }
+}
+
+/** Возвращает Location, если хост ответил редиректом, иначе null. */
+async function peekRedirectLocation(url: string): Promise<string | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), REDIRECT_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: { 'User-Agent': REDIRECT_PROBE_USER_AGENT },
+    })
+
+    // Тело нам не нужно — обрываем, чтобы не качать видео дважды.
+    await response.body?.cancel().catch(() => {})
+
+    if (response.status < 300 || response.status >= 400) return null
+    return response.headers.get('location')
+  } catch (error) {
+    console.warn(`⚠️  Redirect probe failed for ${url}: ${(error as Error).message}`)
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
