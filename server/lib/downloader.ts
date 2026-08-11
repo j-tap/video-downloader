@@ -65,6 +65,30 @@ const FACEBOOK_COOKIES_CANDIDATES = [
   '/app/data/cookiesFacebook.txt',
 ].filter(Boolean) as string[]
 
+/**
+ * Cookie строго привязаны к площадке. Общий файл (COOKIES_FILE / data/cookies.txt)
+ * подставляется только к известной площадке: иначе достаточно было бы прислать
+ * ссылку на свой сервер, чтобы получить cookie владельца сервиса.
+ */
+interface CookieProfile {
+  name: string
+  matches: (url: string) => boolean
+  files: string[]
+  /** Переменная с браузером для --cookies-from-browser */
+  browserEnv: string
+}
+
+const COOKIE_PROFILES: CookieProfile[] = [
+  { name: 'youtube', matches: (url) => isYouTube(url), files: YOUTUBE_COOKIES_CANDIDATES, browserEnv: 'YT_COOKIES_FROM_BROWSER' },
+  { name: 'kino.pub', matches: (url) => isKinoPubRelated(url), files: KINOPUB_COOKIES_CANDIDATES, browserEnv: 'KINOPUB_COOKIES_FROM_BROWSER' },
+  { name: 'instagram', matches: (url) => isInstagram(url), files: INSTAGRAM_COOKIES_CANDIDATES, browserEnv: 'INSTAGRAM_COOKIES_FROM_BROWSER' },
+  { name: 'facebook', matches: (url) => isFacebook(url), files: FACEBOOK_COOKIES_CANDIDATES, browserEnv: 'FACEBOOK_COOKIES_FROM_BROWSER' },
+]
+
+function findCookieProfile(url: string): CookieProfile | null {
+  return COOKIE_PROFILES.find((profile) => profile.matches(url)) ?? null
+}
+
 export function resolveCookiesFile(url?: string): string | null {
   for (const candidate of getCookiesCandidates(url)) {
     const resolved = path.isAbsolute(candidate)
@@ -758,8 +782,8 @@ function getTempCookiesPath(id: string): string {
   return path.join(tmpdir(), `cookies-${id}.txt`)
 }
 
-function getCookiesArgs(id: string, url: string): string[] {
-  const fromBrowser = getCookiesFromBrowser(url)
+export function getCookiesArgs(id: string, url: string): string[] {
+  const fromBrowser = resolveCookiesFromBrowser(url)
   if (fromBrowser) {
     return ['--cookies-from-browser', fromBrowser]
   }
@@ -777,53 +801,24 @@ function cleanupTempCookies(id: string): void {
 }
 
 function getCookiesCandidates(url?: string): string[] {
+  // Без URL — только для стартовой диагностики «настроены ли cookie вообще».
   if (!url) {
-    return [
-      ...DEFAULT_COOKIES_CANDIDATES,
-      ...YOUTUBE_COOKIES_CANDIDATES,
-      ...KINOPUB_COOKIES_CANDIDATES,
-      ...INSTAGRAM_COOKIES_CANDIDATES,
-      ...FACEBOOK_COOKIES_CANDIDATES,
-    ]
+    return [...DEFAULT_COOKIES_CANDIDATES, ...COOKIE_PROFILES.flatMap((profile) => profile.files)]
   }
 
-  if (isYouTube(url)) {
-    return [...YOUTUBE_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
-  }
+  const profile = findCookieProfile(url)
 
-  if (isKinoPubRelated(url)) {
-    return [...KINOPUB_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
-  }
+  // Хост не совпал ни с одной площадкой — никаких cookie, в том числе общих.
+  if (!profile) return []
 
-  if (isInstagram(url)) {
-    return [...INSTAGRAM_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
-  }
-
-  if (isFacebook(url)) {
-    return [...FACEBOOK_COOKIES_CANDIDATES, ...DEFAULT_COOKIES_CANDIDATES]
-  }
-
-  return DEFAULT_COOKIES_CANDIDATES
+  return [...profile.files, ...DEFAULT_COOKIES_CANDIDATES]
 }
 
-function getCookiesFromBrowser(url: string): string | null {
-  if (isYouTube(url)) {
-    return process.env.YT_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
-  }
+export function resolveCookiesFromBrowser(url: string): string | null {
+  const profile = findCookieProfile(url)
+  if (!profile) return null
 
-  if (isKinoPubRelated(url)) {
-    return process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
-  }
-
-  if (isInstagram(url)) {
-    return process.env.INSTAGRAM_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
-  }
-
-  if (isFacebook(url)) {
-    return process.env.FACEBOOK_COOKIES_FROM_BROWSER?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
-  }
-
-  return process.env.COOKIES_FROM_BROWSER?.trim() || null
+  return process.env[profile.browserEnv]?.trim() || process.env.COOKIES_FROM_BROWSER?.trim() || null
 }
 
 function cleanupDownloadArtifacts(id: string): void {
@@ -1209,7 +1204,7 @@ function getPublicErrorMessage(detail: string, url: string): string {
   }
 
   if (isKinoPubRelated(url) && /authoriz|login|sign in|403|forbidden|unauthorized|access denied|cookies/i.test(detail)) {
-    const hasCookies = Boolean(getCookiesFromBrowser(url) || resolveCookiesFile(url))
+    const hasCookies = Boolean(resolveCookiesFromBrowser(url) || resolveCookiesFile(url))
     if (!hasCookies) {
       return 'kino.pub требует авторизацию: добавьте KINOPUB_COOKIES_FILE (data/cookiesKinoPub.txt) или KINOPUB_COOKIES_FROM_BROWSER.'
     }
