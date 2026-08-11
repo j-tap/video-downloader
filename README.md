@@ -25,11 +25,14 @@ bun run dev
 
 ## Поддерживаемые источники
 
-- YouTube
-- Facebook
-- Instagram
-- kino.pub (обычно требует авторизацию через cookies)
-- Прочие сайты, поддерживаемые `yt-dlp`
+- YouTube (`youtube.com`, `youtu.be`, `youtube-nocookie.com`)
+- Facebook (`facebook.com`, `fb.com`, `fb.watch`)
+- Instagram (`instagram.com`, `instagr.am`)
+- kino.pub и её CDN `cdntogo.net` (обычно требует авторизацию через cookies)
+
+Другие сайты отклоняются: сервис публичный, и открытый список хостов
+превращает его в прокси во внутреннюю сеть. Список расширяется через
+`ALLOWED_HOSTS` — см. [Безопасность](#безопасность).
 
 ## Cookies и авторизация
 
@@ -50,6 +53,9 @@ bun run dev
 
 - `COOKIES_FILE` или `data/cookies.txt`
 - `COOKIES_FROM_BROWSER`
+
+Общий файл подставляется только к известной площадке, у которой нет своего.
+Хост вне списка площадок не получает cookies вообще.
 
 ### Instagram / Facebook
 
