@@ -11,8 +11,8 @@ import { createRateLimiter, readRateLimitEnv } from '../lib/security/rateLimit'
  */
 const downloadLimiter = createRateLimiter({
   name: 'download',
-  windowMs: readRateLimitEnv('RATE_LIMIT_DOWNLOAD_WINDOW_MINUTES', 15) * 60_000,
-  max: readRateLimitEnv('RATE_LIMIT_DOWNLOAD_MAX', 10),
+  windowMs: readRateLimitEnv('RATE_LIMIT_DOWNLOAD_WINDOW_MINUTES', 10) * 60_000,
+  max: readRateLimitEnv('RATE_LIMIT_DOWNLOAD_MAX', 5),
   message: 'Слишком много загрузок с вашего адреса. Попробуйте позже.',
 })
 

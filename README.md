@@ -99,7 +99,7 @@ bun run dev
 
 | Что | Переменная | По умолчанию |
 | --- | --- | --- |
-| Стартов загрузки с IP | `RATE_LIMIT_DOWNLOAD_MAX` | 10 / 15 мин |
+| Стартов загрузки с IP | `RATE_LIMIT_DOWNLOAD_MAX` | 5 / 10 мин |
 | Прочих запросов с IP | `RATE_LIMIT_API_MAX` | 240 / мин |
 | Одновременных загрузок | `MAX_CONCURRENT_DOWNLOADS` | 3 |
 | Одновременно с одного IP | `MAX_CONCURRENT_PER_CLIENT` | 1 |
