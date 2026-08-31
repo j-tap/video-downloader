@@ -471,17 +471,25 @@ function runDownloadProcess(url: string, filePath: string, id: string): void {
   }
 
   const args = buildYtDlpArgs(target.url, filePath, id, { attempt: 0, playlistItemIndex: target.playlistItemIndex })
-  runYtDlpProcess(args, id, filePath, { url: target.url, filePath, attempt: 0, useProxy: true, playlistItemIndex: target.playlistItemIndex })
+  runYtDlpProcess(args, id, filePath, {
+    url: target.url,
+    filePath,
+    attempt: 0,
+    useProxy: true,
+    useCookies: true,
+    playlistItemIndex: target.playlistItemIndex,
+  })
 }
 
 interface BuildOptions {
   attempt?: number
   useProxy?: boolean
+  useCookies?: boolean
   playlistItemIndex?: number | null
 }
 
 function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
-  const { attempt = 0, useProxy = true, playlistItemIndex = null } = options
+  const { attempt = 0, useProxy = true, useCookies = true, playlistItemIndex = null } = options
   const args = [
     ...getPlaylistArgs(url, playlistItemIndex),
     '--no-warnings',
@@ -492,7 +500,7 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
     ...getLimitArgs(),
     ...getJsRuntimeArgs(),
     ...getProxyArgs(useProxy),
-    ...getCookiesArgs(id, url),
+    ...getCookiesArgs(id, url, useCookies),
     ...getPlatformArgs(url, attempt),
     '-o', filePath,
     url,
@@ -782,7 +790,9 @@ function getTempCookiesPath(id: string): string {
   return path.join(tmpdir(), `cookies-${id}.txt`)
 }
 
-export function getCookiesArgs(id: string, url: string): string[] {
+export function getCookiesArgs(id: string, url: string, useCookies = true): string[] {
+  if (!useCookies) return []
+
   const fromBrowser = resolveCookiesFromBrowser(url)
   if (fromBrowser) {
     return ['--cookies-from-browser', fromBrowser]
@@ -1019,6 +1029,7 @@ interface RunContext {
   filePath: string
   attempt: number
   useProxy: boolean
+  useCookies: boolean
   playlistItemIndex: number | null
 }
 
@@ -1191,9 +1202,27 @@ function tryRetry(
     const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
       attempt: ctx.attempt,
       useProxy: false,
+      useCookies: ctx.useCookies,
       playlistItemIndex: ctx.playlistItemIndex,
     })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useProxy: false })
+    return true
+  }
+
+  // Сессия, выгруженная из домашнего браузера, часто не принимается с адреса
+  // сервера: YouTube привязывает её к сети, где она была создана. С такими
+  // cookies yt-dlp вдобавок переключается на клиентов «для залогиненных»
+  // и упирается в проверку на бота, хотя анонимно видео скачалось бы.
+  // Поэтому отвергнутые cookies — повод повторить попытку без них, а не сдаться.
+  if (ctx.useCookies && isRejectedSession(logSummary) && hasCookiesFor(entry.url)) {
+    console.log(`⚠️  [${id}] Источник не принял cookies, повтор без них...`)
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
+      attempt: ctx.attempt,
+      useProxy: ctx.useProxy,
+      useCookies: false,
+      playlistItemIndex: ctx.playlistItemIndex,
+    })
+    runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useCookies: false })
     return true
   }
 
@@ -1203,6 +1232,7 @@ function tryRetry(
     const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
       attempt: nextAttempt,
       useProxy: ctx.useProxy,
+      useCookies: ctx.useCookies,
       playlistItemIndex: ctx.playlistItemIndex,
     })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, attempt: nextAttempt })
@@ -1210,6 +1240,15 @@ function tryRetry(
   }
 
   return false
+}
+
+/** Источник увидел сессию и отказал именно ей, а не запросу вообще. */
+function isRejectedSession(logSummary: string): boolean {
+  return /Sign in to confirm|not a bot|cookies are no longer valid|cookies.*invalid|Please sign in|login required|account.*(banned|suspended)/i.test(logSummary)
+}
+
+function hasCookiesFor(url: string): boolean {
+  return Boolean(resolveCookiesFromBrowser(url) || resolveCookiesFile(url))
 }
 
 function scheduleCleanup(entry: DownloadEntry): void {
@@ -1235,10 +1274,19 @@ function failDownload(id: string, entry: DownloadEntry, logSummary: string, code
     console.error(`❌  [${id}] Full log:\n${logSummary}`)
   }
   entry.status = 'error'
-  entry.error = getPublicErrorMessage(detail, entry.url)
+  // Классифицируем по исходному логу, а не по сводке для админа: она уже
+  // содержит подсказки про cookies и переменные окружения, и раньше именно
+  // они уезжали посетителю через ветку «Ошибка загрузки: <текст>».
+  entry.error = getPublicErrorMessage(logSummary || detail)
 }
 
-function getPublicErrorMessage(detail: string, url: string): string {
+/**
+ * Текст для посетителя. Сервис публичный, поэтому наружу уходит только то,
+ * с чем человек может что-то сделать сам. Имена переменных окружения, пути
+ * к файлам cookies и сырой вывод yt-dlp остаются в логе сервера: посетителю
+ * они ничего не дают, а нам показывают устройство сервиса.
+ */
+function getPublicErrorMessage(detail: string): string {
   if (/larger than max-filesize/i.test(detail)) {
     return `Видео больше лимита ${formatBytes(limits.maxDownloadBytes)}.`
   }
@@ -1248,63 +1296,34 @@ function getPublicErrorMessage(detail: string, url: string): string {
   }
 
   if (/only trailer stream/i.test(detail)) {
-    return 'Для этой страницы kino.pub доступен только трейлер. Вставьте прямую ссылку на full m3u8 из Network.'
-  }
-
-  if (isKinoPubRelated(url) && /authoriz|login|sign in|403|forbidden|unauthorized|access denied|cookies/i.test(detail)) {
-    const hasCookies = Boolean(resolveCookiesFromBrowser(url) || resolveCookiesFile(url))
-    if (!hasCookies) {
-      return 'kino.pub требует авторизацию: добавьте KINOPUB_COOKIES_FILE (data/cookiesKinoPub.txt) или KINOPUB_COOKIES_FROM_BROWSER.'
-    }
-    return 'kino.pub не принял cookies: обновите cookiesKinoPub.txt (экспорт из браузера с активной сессией).'
-  }
-
-  if (isInstagram(url) && /login|sign in|cookies|private|403|forbidden|unauthorized/i.test(detail)) {
-    return 'Instagram требует авторизацию: укажите INSTAGRAM_COOKIES_FILE или INSTAGRAM_COOKIES_FROM_BROWSER.'
-  }
-
-  if (isFacebook(url) && /login|sign in|cookies|private|403|forbidden|unauthorized/i.test(detail)) {
-    return 'Facebook требует авторизацию: укажите FACEBOOK_COOKIES_FILE или FACEBOOK_COOKIES_FROM_BROWSER.'
-  }
-
-  if (/Sign in to confirm/i.test(detail)) {
-    return 'Требуется авторизация для источника.'
-  }
-
-  if (/Connection refused|SocksHTTPSConnection|proxy|timed out|Failed to establish/i.test(detail)) {
-    return 'Ошибка сети или прокси.'
+    return 'Для этой страницы доступен только трейлер.'
   }
 
   if (/DRM|Widevine|protected content|copyright protection/i.test(detail)) {
     return 'Видео защищено DRM и не может быть скачано.'
   }
 
-  if (/Postprocessing|ffmpeg|Conversion failed|Error opening output files|Invalid data found/i.test(detail)) {
-    return 'Ошибка обработки видео (ffmpeg/postprocessing). Проверьте исходный поток и попробуйте снова.'
+  if (/Sign in to confirm|not a bot|age.restricted|authoriz|login|sign in|private|unauthorized|forbidden|403|access denied|cookies/i.test(detail)) {
+    return 'Источник не отдаёт это видео без авторизации.'
   }
 
-  if (/Unsupported URL|No video formats found|404|not found/i.test(detail)) {
+  if (/Unsupported URL|No video formats found|404|not found|unavailable|removed|deleted/i.test(detail)) {
     return 'Видео не найдено или ссылка не поддерживается.'
   }
 
+  if (/Connection refused|SocksHTTPSConnection|proxy|timed out|Failed to establish|Unable to download/i.test(detail)) {
+    return 'Не удалось связаться с источником. Попробуйте позже.'
+  }
+
+  if (/Postprocessing|ffmpeg|Conversion failed|Error opening output files|Invalid data found/i.test(detail)) {
+    return 'Не удалось обработать видео. Попробуйте ещё раз.'
+  }
+
   if (/File not found after download|Unable to read downloaded file|Downloaded file is empty/i.test(detail)) {
-    return 'Источник отдал некорректный файл. Повторите попытку или обновите cookies.'
+    return 'Источник отдал некорректный файл. Попробуйте ещё раз.'
   }
 
-  if (/age.restricted/i.test(detail)) {
-    return 'Контент недоступен без авторизации.'
-  }
-
-  const normalized = detail
-    .replace(/^ERROR:\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  if (normalized) {
-    return `Ошибка загрузки: ${normalized.slice(0, 220)}`
-  }
-
-  return 'Ошибка загрузки.'
+  return 'Не удалось скачать видео. Попробуйте позже или пришлите другую ссылку.'
 }
 
 function cleanErrorMessage(error: string): string {

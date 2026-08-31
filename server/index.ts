@@ -119,10 +119,18 @@ app.listen(port, () => {
   void reportPotProvider()
 })
 
+const POT_PING_ATTEMPTS = 6
+const POT_PING_DELAY_MS = 5000
+
 /**
  * Провайдер PO Token недоступен молча: yt-dlp просто скачает YouTube хуже
  * (403 или единственная дорожка 360p). Проверяем на старте, чтобы это было
  * видно в логах, но загрузки от результата не зависят.
+ *
+ * Проверяем с повторами: `depends_on` в compose дожидается только запуска
+ * контейнера, а не готовности сервиса внутри него, поэтому одиночный пинг
+ * сразу после старта почти всегда уходит раньше, чем провайдер начинает
+ * слушать, — и в лог падало предупреждение о вполне живом сервисе.
  */
 async function reportPotProvider(): Promise<void> {
   const baseUrl = process.env.POT_PROVIDER_BASE_URL?.trim()
@@ -131,13 +139,35 @@ async function reportPotProvider(): Promise<void> {
     return
   }
 
+  for (let attempt = 1; attempt <= POT_PING_ATTEMPTS; attempt += 1) {
+    const failure = await pingPotProvider(baseUrl)
+
+    if (!failure) {
+      console.log(`PO Token: провайдер доступен (${baseUrl})`)
+      return
+    }
+
+    if (attempt === POT_PING_ATTEMPTS) {
+      const waited = (POT_PING_ATTEMPTS - 1) * POT_PING_DELAY_MS / 1000
+      console.warn(
+        `⚠️  PO Token: провайдер ${baseUrl} не ответил за ${waited} с (${failure}) `
+        + '— YouTube может отдавать 360p или 403',
+      )
+      return
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, POT_PING_DELAY_MS))
+  }
+}
+
+/** Возвращает описание ошибки или null, если провайдер ответил. */
+async function pingPotProvider(baseUrl: string): Promise<string | null> {
   try {
     const response = await fetch(new URL('/ping', baseUrl), {
       signal: AbortSignal.timeout(3000),
     })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    console.log(`PO Token: провайдер доступен (${baseUrl})`)
+    return response.ok ? null : `HTTP ${response.status}`
   } catch (error) {
-    console.warn(`⚠️  PO Token: провайдер ${baseUrl} недоступен (${(error as Error).message}) — YouTube может отдавать 360p или 403`)
+    return (error as Error).message
   }
 }
