@@ -51,7 +51,10 @@
     </form>
   </div>
   <footer class="footer">
-    <span class="vr9copy">Create by <a href="https://vr9.pro" target="_blank">VR nine</a></span>
+    <!-- Виджет vr9 дописывается внутрь .vr9copy, поэтому ссылку рядом с ним
+         видеть не нужно: сервер вырезает блок data-bot-only для живых
+         посетителей и оставляет его краулерам (server/routes/page.ts). -->
+    <span class="vr9copy"><span data-bot-only>Create by <a href="https://vr9.pro" target="_blank">VR nine</a></span></span>
   </footer>
 </section>
 <script src="main.js" defer></script>

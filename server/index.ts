@@ -4,6 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import 'dotenv/config'
 import { registerRoutes } from './routes'
+import { createPageHandler } from './routes/page'
 import { cleanupOrphanedFiles, getCookiesConfig, verifyYtDlp } from './lib/downloader'
 import { clientIdMiddleware } from './lib/security/clientId'
 import { limits } from './lib/config'
@@ -37,8 +38,16 @@ app.use(express.json({ limit: '16kb' }))
 app.use(securityHeaders)
 app.use(clientIdMiddleware)
 
-// Статические файлы из папки client (должно быть первым)
 const clientPath = path.join(__dirname, '../client')
+
+// index.html отдаём сами и до express.static: статика обслужила бы `/`
+// своим index.html в обход обработчика, а он подменяет разметку футера
+// в зависимости от того, кто пришёл — краулер или живой посетитель.
+const pageHandler = createPageHandler(clientPath)
+app.get('/', pageHandler)
+app.get('/index.html', pageHandler)
+
+// Остальные статические файлы из папки client
 app.use(express.static(clientPath, {
   maxAge: 0, // Отключаем кеш в development
   etag: false,
@@ -59,15 +68,6 @@ app.use(express.static(clientPath, {
 
 // Регистрируем API маршруты
 registerRoutes(app)
-
-// Отдаем index.html для корневого маршрута (в самом конце)
-app.get('/', (req, res) => {
-  // Отключаем кеш для HTML
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
-  res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
-  res.sendFile(path.join(clientPath, 'index.html'))
-})
 
 function securityHeaders(_req: express.Request, res: express.Response, next: express.NextFunction) {
   res.setHeader('X-Content-Type-Options', 'nosniff')
