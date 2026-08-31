@@ -2,12 +2,20 @@ name: ${APP_NAME:-downloadervr9pro}
 
 services:
   downloadervr9pro:
+    # Явное имя образа: без него compose называет образ `<проект>-<сервис>`,
+    # и `make up` (docker run $(APP_NAME)) не находит собранный образ.
+    image: ${APP_NAME:-downloadervr9pro}:latest
     ports: []
     restart: unless-stopped
+    # Настройки едут в контейнер через окружение, а не запечёнными в образ:
+    # прокси, лимиты, ALLOWED_HOSTS и пути к cookies меняются без пересборки.
+    env_file:
+      - .env
     environment:
       NODE_ENV: production
       YT_COOKIES_FILE: ${YT_COOKIES_FILE:-/app/data/cookiesYoutube.txt}
       KINOPUB_COOKIES_FILE: ${KINOPUB_COOKIES_FILE:-/app/data/cookiesKinoPub.txt}
+      POT_PROVIDER_BASE_URL: http://potprovider:4416
     volumes:
       - ./data:/app/data:ro
     build:
@@ -15,9 +23,25 @@ services:
       dockerfile: Dockerfile
       args:
         MODE: production
+        YTDLP_REFRESH: ${YTDLP_REFRESH:-latest}
+    depends_on:
+      - potprovider
     networks:
       - traefik
+      - internal
+
+  # Выдаёт PO Token для YouTube. Без токена серверному IP достаётся либо 403,
+  # либо единственная дорожка 360p. Наружу не публикуется: только внутренняя
+  # сеть, никаких меток traefik.
+  potprovider:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    restart: unless-stopped
+    init: true
+    networks:
+      - internal
 
 networks:
   traefik:
     external: true
+  internal:
+    driver: bridge

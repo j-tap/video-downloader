@@ -1,2 +1,17 @@
 node_modules
 *.log
+
+# Секреты и данные приезжают в контейнер маунтом и через env_file,
+# запекать их в слои образа не нужно.
+.env
+data
+
+# Не влияет на сборку — только раздувает контекст и слои.
+.git
+.github
+.idea
+.DS_Store
+docker-compose*.yml
+Makefile
+README.md
+*.test.ts

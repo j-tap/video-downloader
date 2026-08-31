@@ -917,32 +917,76 @@ function getPlatformArgs(url: string, attempt: number): string[] {
   }
 
   return [
-    '-f', 'bv*+ba/b',
+    '-f', getVideoFormat(),
     '--merge-output-format', 'mp4',
     '--remux-video', 'mp4',
     '--postprocessor-args', 'ffmpeg:-movflags +faststart',
   ]
 }
 
+/**
+ * H.264 + AAC вместо «просто лучшего качества». YouTube отдаёт лучшие дорожки
+ * в AV1/VP9 со звуком Opus, а `--remux-video mp4` кладёт их в mp4 как есть:
+ * расширение mp4, а QuickTime, Safari, телевизоры и видеоредакторы такой файл
+ * либо не открывают, либо воспроизводят без звука. Фолбэк `bv*+ba/b` оставляет
+ * прежнее поведение, если совместимой дорожки у источника нет вовсе.
+ *
+ * Цена — потолок 1080p на YouTube (avc1 выше не раздаётся).
+ * VIDEO_FORMAT переопределяет селектор, если качество важнее совместимости.
+ */
+const COMPATIBLE_VIDEO_FORMAT = 'bv*[vcodec^=avc1]+ba[acodec^=mp4a]/bv*+ba/b'
+
+function getVideoFormat(): string {
+  return process.env.VIDEO_FORMAT?.trim() || COMPATIBLE_VIDEO_FORMAT
+}
+
 function getYouTubeArgs(attempt: number): string[] {
   const args: string[] = [
-    '-f', 'bv*+ba/b',
+    '-f', getVideoFormat(),
     '--merge-output-format', 'mp4',
     '--remux-video', 'mp4',
     '--postprocessor-args', 'ffmpeg:-movflags +faststart',
   ]
 
-  const poToken = process.env.YT_PO_TOKEN
+  // Повторный --extractor-args с тем же ключом экстрактора не дополняет
+  // предыдущий, а заменяет его целиком. Раньше po_token и player_client
+  // ехали двумя флагами, и заданный YT_PO_TOKEN молча терялся.
+  const youtubeArgs: string[] = []
+
+  const poToken = process.env.YT_PO_TOKEN?.trim()
   if (poToken) {
-    args.push('--extractor-args', `youtube:po_token=${poToken}`)
+    youtubeArgs.push(`po_token=${poToken}`)
   }
 
   const playerClient = getYouTubePlayerClient(attempt)
   if (playerClient) {
-    args.push('--extractor-args', `youtube:player_client=${playerClient}`)
+    youtubeArgs.push(`player_client=${playerClient}`)
   }
 
+  if (youtubeArgs.length > 0) {
+    args.push('--extractor-args', `youtube:${youtubeArgs.join(';')}`)
+  }
+
+  args.push(...getPotProviderArgs())
+
   return args
+}
+
+/**
+ * Провайдер PO Token (bgutil) поднимается отдельным контейнером и выдаёт токен
+ * на каждое видео. Без токена YouTube отдаёт серверным IP либо 403, либо одну
+ * дорожку 360p. Провайдер необязателен: если он не поднят, yt-dlp ограничится
+ * предупреждением и продолжит работу.
+ */
+function getPotProviderArgs(): string[] {
+  const baseUrl = process.env.POT_PROVIDER_BASE_URL?.trim()
+  if (!baseUrl) return []
+
+  return ['--extractor-args', `youtubepot-bgutilhttp:base_url=${baseUrl}`]
+}
+
+function hasPoTokenSource(): boolean {
+  return Boolean(process.env.POT_PROVIDER_BASE_URL?.trim() || process.env.YT_PO_TOKEN?.trim())
 }
 
 function getYouTubePlayerClient(attempt: number): string | null {
@@ -950,14 +994,18 @@ function getYouTubePlayerClient(attempt: number): string | null {
     return process.env.YT_PLAYER_CLIENT
   }
 
-  const hasCookies = getCookiesConfig().configured
-
   // Первая попытка — без переопределения: набор клиентов по умолчанию
-  // в yt-dlp обновляется вместе с изменениями YouTube и работает лучше всего.
-  // Клиент `android` сюда не входит намеренно: он молча отдаёт только 360p.
-  const fallbacks: Array<string | null> = hasCookies
-    ? [null, 'android_vr,mweb', 'web,web_safari']
-    : [null, 'android_vr,mweb,web_safari', 'tv_simply,ios']
+  // в yt-dlp обновляется вместе с изменениями YouTube (и сам учитывает,
+  // переданы ли cookie), поэтому работает лучше всего.
+  //
+  // Дальше важно, какие клиенты требуют PO Token для ссылок на видео:
+  // без токена `web`, `mweb`, `android_vr`, `tv_simply` отдают одну дорожку
+  // 360p — то есть «скачалось, но плохо», что хуже честной ошибки.
+  // Поэтому без провайдера токенов в фолбэках только клиенты, которым
+  // токен не нужен, а с провайдером добавляем и остальные.
+  const fallbacks: Array<string | null> = hasPoTokenSource()
+    ? [null, 'web_safari,web_embedded', 'mweb,web,tv_simply']
+    : [null, 'web_safari,web_embedded', 'visionos,web_embedded,tv_downgraded']
 
   const index = Math.min(Math.max(attempt, 0), fallbacks.length - 1)
 

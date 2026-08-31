@@ -2,8 +2,13 @@ services:
   downloadervr9pro:
     networks:
       - traefik
+      - internal
     labels:
       - "traefik.enable=true"
+      # Контейнер подключён к двум сетям (traefik и внутренняя к potprovider).
+      # Без явного указания traefik может взять адрес из внутренней сети,
+      # до которой сам не достучится, — и сайт отдаст 502.
+      - "traefik.docker.network=traefik"
 
       # HTTPS
       - "traefik.http.routers.downloadervr9pro.rule=Host(`${TRAEFIK_DOMAIN}`)"
@@ -22,3 +27,5 @@ services:
 networks:
   traefik:
     external: true
+  internal:
+    driver: bridge

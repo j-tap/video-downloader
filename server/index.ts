@@ -115,4 +115,29 @@ app.listen(port, () => {
   } else {
     console.warn('Cookies: не настроены (data/cookies.txt или COOKIES_FILE)')
   }
+
+  void reportPotProvider()
 })
+
+/**
+ * Провайдер PO Token недоступен молча: yt-dlp просто скачает YouTube хуже
+ * (403 или единственная дорожка 360p). Проверяем на старте, чтобы это было
+ * видно в логах, но загрузки от результата не зависят.
+ */
+async function reportPotProvider(): Promise<void> {
+  const baseUrl = process.env.POT_PROVIDER_BASE_URL?.trim()
+  if (!baseUrl) {
+    console.warn('PO Token: провайдер не настроен (POT_PROVIDER_BASE_URL)')
+    return
+  }
+
+  try {
+    const response = await fetch(new URL('/ping', baseUrl), {
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    console.log(`PO Token: провайдер доступен (${baseUrl})`)
+  } catch (error) {
+    console.warn(`⚠️  PO Token: провайдер ${baseUrl} недоступен (${(error as Error).message}) — YouTube может отдавать 360p или 403`)
+  }
+}
