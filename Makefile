@@ -25,6 +25,14 @@ up: build
 
 prod: build
 	$(COMPOSE_CMD) up -d
+	@bash scripts/egress-firewall.sh --ensure \
+		|| echo "⚠️  Egress-фаервол не применился — проверьте: sudo bash scripts/egress-firewall.sh --status"
+
+firewall:
+	bash scripts/egress-firewall.sh
+
+firewall-status:
+	bash scripts/egress-firewall.sh --status
 
 restart:
 	$(COMPOSE_CMD) restart
