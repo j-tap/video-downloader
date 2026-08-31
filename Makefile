@@ -25,9 +25,8 @@ up: build
 
 prod: build
 	$(COMPOSE_CMD) up -d
-	@bash scripts/egress-firewall.sh --ensure \
-		|| echo "⚠️  Egress-фаервол не применился — проверьте: sudo bash scripts/egress-firewall.sh --status"
 
+# Необязательная защита, по умолчанию выключена — см. README.
 firewall:
 	bash scripts/egress-firewall.sh
 
