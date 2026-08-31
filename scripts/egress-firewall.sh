@@ -121,6 +121,48 @@ if [[ "$MODE" == "--ensure" ]]; then
   echo "🔒 Egress-фаервол: правил нет или сменилась подсеть, применяю заново..."
 fi
 
+# Правила привязаны к адресам нашей сети, а контейнер подключён к двум
+# (своя + traefik). Если исходящий трафик уходит через traefik, под правила
+# он не попадёт и защиты не будет — молча. Поэтому сверяем шлюз по умолчанию
+# внутри контейнера с нашим: /proc/net/route есть всегда, лишних утилит не надо.
+check_egress_route() {
+  local container gw_hex gw internal_gw
+  container=$(docker ps -q \
+    --filter "label=com.docker.compose.project=${APP_NAME}" \
+    --filter "label=com.docker.compose.service=downloadervr9pro" | head -1)
+
+  if [[ -z "$container" ]]; then
+    echo "ℹ️  Контейнер не запущен — проверку маршрута пропускаю."
+    return 0
+  fi
+
+  internal_gw=$(docker network inspect "${APP_NAME}_internal" \
+    -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+
+  gw_hex=$(docker exec "$container" cat /proc/net/route 2>/dev/null \
+    | awk '$2 == "00000000" { print $3; exit }' || true)
+
+  if [[ -z "$gw_hex" || -z "$internal_gw" ]]; then
+    echo "ℹ️  Не удалось определить маршрут контейнера — проверьте вручную:"
+    echo "   docker exec $container curl -sS -m 5 http://169.254.169.254/"
+    return 0
+  fi
+
+  # /proc/net/route хранит адрес в hex и в обратном порядке байт.
+  gw=$(printf '%d.%d.%d.%d' \
+    "0x${gw_hex:6:2}" "0x${gw_hex:4:2}" "0x${gw_hex:2:2}" "0x${gw_hex:0:2}")
+
+  if [[ "$gw" == "$internal_gw" ]]; then
+    echo "✅ Исходящий трафик идёт через сеть сервиса ($gw) — правила действуют."
+    return 0
+  fi
+
+  echo "⚠️  Внимание: исходящий трафик контейнера идёт через шлюз $gw,"
+  echo "   а правила привязаны к сети сервиса ($internal_gw). Значит они"
+  echo "   не действуют. Расширять их на общую сеть traefik нельзя —"
+  echo "   заденет соседние проекты. Напишите об этом, нужен другой подход."
+}
+
 echo "Внутренняя сеть сервиса: $INTERNAL_NET"
 
 # Своя цепочка вместо правки DOCKER-USER напрямую: её можно целиком
@@ -134,12 +176,9 @@ iptables -A "$CHAIN" -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
 # 2. Внутри своей сети общаться можно — там живёт provider PO Token.
 iptables -A "$CHAIN" -s "$INTERNAL_NET" -d "$INTERNAL_NET" -j RETURN
 
-# 3. Адрес облачных метаданных (ключи доступа, токены) закрываем для всех
-#    контейнеров: он не нужен ни одному из них ни при каких обстоятельствах.
-iptables -A "$CHAIN" -d 169.254.0.0/16 -j DROP
-
-# 4. Остальная внутренняя адресация — только для контейнеров сервиса,
-#    чтобы не задеть соседние проекты в общей сети traefik.
+# 3. Внутренняя адресация (включая 169.254.169.254 с ключами облака) —
+#    строго с адресов нашей сети. Соседние проекты в общей сети traefik
+#    под правила не попадают: у них другие адреса источника.
 for net in "${PRIVATE_NETS[@]}"; do
   iptables -A "$CHAIN" -s "$INTERNAL_NET" -d "$net" -j DROP
 done
@@ -153,3 +192,6 @@ printf 'применено %s для сети %s\n' "$(date '+%Y-%m-%d %H:%M:%S'
 
 echo "✅ Готово ($INTERNAL_NET). Правила:"
 iptables -L "$CHAIN" -n --line-numbers
+
+check_egress_route
+
