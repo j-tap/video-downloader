@@ -4,23 +4,51 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="shortcut icon" href="https://downloader.vr9.pro/favicon.ico">
-  <title>Video Downloader</title>
-  <meta name="title" content="Shorter">
-  <meta name="description" content="Download video from any source">
+  <title>Video Downloader — save video from any link</title>
+  <meta name="description" content="Free online video downloader: paste a link and save the video in the best available quality. No sign-up, no ads, works with YouTube, TikTok, Instagram, X, Vimeo, Reddit and hundreds of other sites.">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <meta name="theme-color" content="#122030">
+  <link rel="canonical" href="https://downloader.vr9.pro/">
   <link rel="image_src" href="https://downloader.vr9.pro/og-image.png">
   <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Video Downloader">
+  <meta property="og:locale" content="en_US">
   <meta property="og:url" content="https://downloader.vr9.pro/">
-  <meta property="og:title" content="Shorter">
-  <meta property="og:description" content="Download video from any source">
+  <meta property="og:title" content="Video Downloader — save video from any link">
+  <meta property="og:description" content="Paste a link and save the video in the best available quality. No sign-up, no ads.">
   <meta property="og:image" content="https://downloader.vr9.pro/og-image.png">
+  <meta property="og:image:alt" content="Video Downloader">
   <meta property="og:image:width" content="500">
   <meta property="og:image:height" content="500">
-  <meta property="twitter:card" content="summary_large_image">
-  <meta property="twitter:url" content="https://downloader.vr9.pro/">
-  <meta property="twitter:title" content="Shorter">
-  <meta property="twitter:description" content="Download video from any source">
-  <meta property="twitter:image" content="https://downloader.vr9.pro/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="https://downloader.vr9.pro/">
+  <meta name="twitter:title" content="Video Downloader — save video from any link">
+  <meta name="twitter:description" content="Paste a link and save the video in the best available quality. No sign-up, no ads.">
+  <meta name="twitter:image" content="https://downloader.vr9.pro/og-image.png">
   <link rel="stylesheet" href="style.css" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Video Downloader",
+    "url": "https://downloader.vr9.pro/",
+    "applicationCategory": "MultimediaApplication",
+    "operatingSystem": "Any",
+    "browserRequirements": "Requires JavaScript",
+    "description": "Free online video downloader: paste a link and save the video in the best available quality. No sign-up and no ads.",
+    "inLanguage": "en",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "author": {
+      "@type": "Organization",
+      "name": "VR9",
+      "url": "https://vr9.pro"
+    }
+  }
+  </script>
 </head>
 <body>
 <section class="app">
@@ -33,6 +61,7 @@
     <form id="form" class="form">
       <div class="form__row">
         <div class="form__field field">
+          <label class="sr-only" for="url">Video URL</label>
           <input id="url" type="text" name="link" placeholder="Paste video URL">
         </div>
         <button id="submitBtn" class="form__btn btn" type="submit">
@@ -49,12 +78,19 @@
         <div id="progressText" class="progress-text"></div>
       </div>
     </form>
+    <!-- Текст только для скринридеров и поисковых роботов: он описывает
+         ровно то, что делает форма выше, поэтому визуально страница
+         остаётся пустой, а краулер получает связный контент. -->
+    <p class="sr-only">
+      Paste a link to a video page and the file is downloaded to your device in
+      the best available quality. Free, without registration and without ads.
+    </p>
   </div>
   <footer class="footer">
     <!-- Виджет vr9 дописывается внутрь .vr9copy, поэтому ссылку рядом с ним
          видеть не нужно: сервер вырезает блок data-bot-only для живых
          посетителей и оставляет его краулерам (server/routes/page.ts). -->
-    <span class="vr9copy"><span data-bot-only>Create by <a href="https://vr9.pro" target="_blank">VR nine</a></span></span>
+    <span class="vr9copy"><span data-bot-only>Created <a href="https://vr9.pro" target="_blank" rel="noopener">VR9</a></span></span>
   </footer>
 </section>
 <script src="main.js" defer></script>

@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /download
+Disallow: /cancel/
+Disallow: /status/
+Disallow: /file/
+
+Sitemap: https://downloader.vr9.pro/sitemap.xml

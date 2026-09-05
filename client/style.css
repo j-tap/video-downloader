@@ -262,3 +262,18 @@ body {
     transform: rotate(360deg);
   }
 }
+
+/* Контент для скринридеров и краулеров: убран из потока, но остаётся
+   в дереве доступности (в отличие от display:none / visibility:hidden). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
