@@ -122,7 +122,7 @@ async function pollStatus(id) {
         throw new Error(error || 'Status check failed')
       }
 
-      const { status, error, progress } = await res.json()
+      const { status, error, progress, title } = await res.json()
 
       if (progress !== undefined && progress !== null) {
         progressContainer.classList.remove('hidden')
@@ -137,7 +137,7 @@ async function pollStatus(id) {
         stopPolling()
         progressBar.style.width = '100%'
         progressText.textContent = '100%'
-        statusText.textContent = '✅ Download ready. Saving file...'
+        showReady(id, title)
         triggerDownload(id)
         setLoading(false)
         setTimeout(resetProgress, 2000)
@@ -165,6 +165,24 @@ async function pollStatus(id) {
       setLoading(false)
     }
   }, 2000)
+}
+
+/**
+ * Название показываем, чтобы сразу было видно, то ли видео скачалось.
+ * Ссылка — запасной путь: мобильные браузеры и встроенные браузеры
+ * приложений молча глушат скачивание, запущенное не по нажатию, и тогда
+ * легко открыть в «Загрузках» старый файл, приняв его за новый.
+ */
+function showReady(id, title) {
+  const link = document.createElement('a')
+  link.href = `/file/${id}`
+  link.textContent = 'Tap here if the download did not start'
+
+  statusText.replaceChildren(
+    `✅ Ready${title ? `: ${title}` : ''}`,
+    document.createElement('br'),
+    link,
+  )
 }
 
 function triggerDownload(id) {

@@ -11,6 +11,7 @@ export function statusHandler(req: Request, res: Response) {
   res.json({
     status: entry.status,
     error: entry.error,
-    progress: entry.progress
+    progress: entry.progress,
+    title: entry.title,
   })
 }

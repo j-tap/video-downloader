@@ -24,6 +24,7 @@ services:
       args:
         MODE: production
         YTDLP_REFRESH: ${YTDLP_REFRESH:-latest}
+        YTDLP_CHANNEL: ${YTDLP_CHANNEL:-nightly}
     depends_on:
       - potprovider
     networks:
@@ -35,6 +36,10 @@ services:
   # сеть, никаких меток traefik.
   potprovider:
     image: brainicism/bgutil-ytdlp-pot-provider:latest
+    # Плагин в основном образе ставится свежим при каждой сборке, а `up -d`
+    # без pull держит провайдер той версии, что скачалась впервые. Разные
+    # версии плагина и провайдера перестают понимать друг друга.
+    pull_policy: always
     restart: unless-stopped
     init: true
     networks:

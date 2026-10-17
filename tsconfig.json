@@ -2,6 +2,8 @@
   "compilerOptions": {
     // Environment setup & latest features
     "lib": ["ESNext"],
+    // С TypeScript 6 пакеты @types/* больше не подключаются сами
+    "types": ["bun"],
     "target": "ESNext",
     "module": "ESNext",
     "moduleDetection": "force",

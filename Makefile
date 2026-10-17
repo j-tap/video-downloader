@@ -14,11 +14,13 @@ COMPOSE_CMD = docker compose -p $(APP_NAME) --env-file .env -f docker-compose.pr
 generate_traefik:
 	bash -c "set -a && source .env && envsubst < docker-compose.traefik.template.yml > docker-compose.traefik.yml"
 
+# --pull: без него oven/bun:latest (а с ним bun, ffmpeg и python)
+# навсегда остаётся тем, что скачался при первой сборке.
 build: generate_traefik
-	$(COMPOSE_CMD) build
+	$(COMPOSE_CMD) build --pull
 
 rebuild: generate_traefik
-	$(COMPOSE_CMD) build --no-cache
+	$(COMPOSE_CMD) build --pull --no-cache
 
 up: build
 	docker run --rm --env-file .env -p $(PORT):$(PORT) -v $(PWD)/data:/app/data:ro $(APP_NAME):latest

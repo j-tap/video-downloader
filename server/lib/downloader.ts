@@ -5,6 +5,7 @@ import crypto from 'crypto'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
 import { formatBytes, formatDuration, limits } from './config'
 import { isPublicUrlSync } from './security/urlGuard'
+import { expandInstagramShortLink, getInstagramSelection, NO_SELECTION, type ItemSelection } from './instagramUrl'
 
 type Status = 'pending' | 'done' | 'error' | 'cancelled'
 
@@ -20,6 +21,8 @@ export interface DownloadEntry {
   createdAt: number
   error?: string
   progress?: number
+  /** Название скачанного видео — по нему видно, то ли видео приехало */
+  title?: string
 }
 
 export type StartDownloadResult =
@@ -182,9 +185,20 @@ export function startDownload(url: string, owner: DownloadOwner): StartDownloadR
   armDownloadTimeout(id)
   startSizeWatchdog(id)
 
-  runDownloadProcess(normalizeUrl(url), filePath, id)
+  runDownloadProcess(normalizeUrl(url), filePath, id, getItemSelection(url))
 
   return { ok: true, id }
+}
+
+/** Выбор считается по исходной ссылке: нормализация вырезает query-параметры. */
+function getItemSelection(url: string): ItemSelection {
+  if (!isInstagram(url)) return NO_SELECTION
+
+  try {
+    return getInstagramSelection(new URL(url))
+  } catch {
+    return NO_SELECTION
+  }
 }
 
 /** Возвращает причину отказа или null, если можно стартовать. */
@@ -269,10 +283,10 @@ export function cleanupOrphanedFiles(): number {
 }
 
 /**
- * Наши файлы называются строго `video-<uuid>...` и `cookies-<uuid>.txt`.
- * Проверка по UUID нужна, чтобы не тронуть чужое в общем /tmp.
+ * Наши файлы называются строго `video-<uuid>...`, `cookies-<uuid>.txt`
+ * и `meta-<uuid>.txt`. Проверка по UUID нужна, чтобы не тронуть чужое в общем /tmp.
  */
-const OWN_TEMP_FILE = /^(?:video|cookies)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.|$)/i
+const OWN_TEMP_FILE = /^(?:video|cookies|meta)-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.|$)/i
 
 function matchOwnTempFile(name: string): string | null {
   return name.match(OWN_TEMP_FILE)?.[1] ?? null
@@ -412,6 +426,7 @@ function normalizeUrl(url: string): string {
   }
 
   if (isInstagram(parsed.href) || isFacebook(parsed.href)) {
+    if (isInstagram(parsed.href)) parsed = expandInstagramShortLink(parsed)
     parsed.search = ''
     parsed.hash = ''
     return parsed.toString()
@@ -454,7 +469,7 @@ function matchYouTubeId(value?: string): string | null {
   return value && YOUTUBE_ID_PATTERN.test(value) ? value : null
 }
 
-function runDownloadProcess(url: string, filePath: string, id: string): void {
+function runDownloadProcess(url: string, filePath: string, id: string, selection: ItemSelection): void {
   const target = resolveDownloadTarget(url, id)
   if (target.trailerOnly) {
     const entry = downloads.get(id)
@@ -470,14 +485,21 @@ function runDownloadProcess(url: string, filePath: string, id: string): void {
     console.log(`ℹ️  [${id}] kino.pub selected playlist item: ${target.playlistItemIndex}`)
   }
 
-  const args = buildYtDlpArgs(target.url, filePath, id, { attempt: 0, playlistItemIndex: target.playlistItemIndex })
+  const playlistItemIndex = target.playlistItemIndex ?? selection.playlistItemIndex
+  const { entryId } = selection
+  if (selection.playlistItemIndex || entryId) {
+    console.log(`ℹ️  [${id}] Selected item: ${entryId ? `id ${entryId}` : `#${playlistItemIndex}`}`)
+  }
+
+  const args = buildYtDlpArgs(target.url, filePath, id, { attempt: 0, playlistItemIndex, entryId })
   runYtDlpProcess(args, id, filePath, {
     url: target.url,
     filePath,
     attempt: 0,
     useProxy: true,
     useCookies: true,
-    playlistItemIndex: target.playlistItemIndex,
+    playlistItemIndex,
+    entryId,
   })
 }
 
@@ -486,22 +508,26 @@ interface BuildOptions {
   useProxy?: boolean
   useCookies?: boolean
   playlistItemIndex?: number | null
+  entryId?: string | null
 }
 
 function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
-  const { attempt = 0, useProxy = true, useCookies = true, playlistItemIndex = null } = options
+  const { attempt = 0, useProxy = true, useCookies = true, playlistItemIndex = null, entryId = null } = options
   const args = [
-    ...getPlaylistArgs(url, playlistItemIndex),
+    ...getPlaylistArgs(url, playlistItemIndex, entryId),
     '--no-warnings',
     '--newline',
     '--socket-timeout', '30',
     '--retries', '5',
     '--fragment-retries', '5',
-    ...getLimitArgs(),
+    ...getLimitArgs(entryId),
     ...getJsRuntimeArgs(),
     ...getProxyArgs(useProxy),
     ...getCookiesArgs(id, url, useCookies),
     ...getPlatformArgs(url, attempt),
+    // Что именно скачалось — для лога и для подписи в интерфейсе.
+    // Без этого жалобу «скачалось не то видео» нечем проверить.
+    '--print-to-file', 'after_move:%(extractor)s\t%(id)s\t%(title)s', getTempMetaPath(id),
     '-o', filePath,
     url,
   ]
@@ -512,18 +538,33 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
 /**
  * Лимиты на стороне yt-dlp. Работают не для всех источников
  * (например --max-filesize неизвестен для HLS), поэтому дублируются watchdog-ом.
+ *
+ * Выбор элемента по id идёт сюда же: несколько --match-filter объединяются
+ * через ИЛИ, и отдельный фильтр по id снял бы лимит на длительность.
  */
-function getLimitArgs(): string[] {
+function getLimitArgs(entryId: string | null): string[] {
+  // `<?` — пропускать, если поле отсутствует (часто у прямых m3u8)
+  const filters = [`duration<?${limits.maxDurationSeconds}`]
+  if (entryId) filters.push(`id=${entryId}`)
+
   return [
     '--max-filesize', String(limits.maxDownloadBytes),
-    // `<?` — пропускать, если поле отсутствует (часто у прямых m3u8)
-    '--match-filter', `duration<?${limits.maxDurationSeconds}`,
+    '--match-filter', filters.join(' & '),
   ]
 }
 
-function getPlaylistArgs(url: string, playlistItemIndex: number | null): string[] {
+function getPlaylistArgs(url: string, playlistItemIndex: number | null, entryId: string | null): string[] {
   if (!isKinoPub(url)) {
-    return ['--no-playlist']
+    // --no-playlist уважают не все экстракторы: карусель и хайлайт Instagram
+    // приходят плейлистом всё равно. Без явного выбора yt-dlp качает каждый
+    // элемент в один и тот же файл, и в нём остаётся первый, а не нужный.
+    if (entryId) {
+      // Позиция истории в подборке неизвестна — ищем по id фильтром
+      // (см. getLimitArgs) и останавливаемся на первом совпадении.
+      return ['--no-playlist', '--max-downloads', '1']
+    }
+
+    return ['--no-playlist', '--playlist-items', String(playlistItemIndex ?? 1)]
   }
 
   if (playlistItemIndex) {
@@ -810,6 +851,34 @@ function cleanupTempCookies(id: string): void {
   fs.unlink(getTempCookiesPath(id), () => {})
 }
 
+/** Не `video-…`: такой файл resolveDownloadedFilePath принял бы за само видео. */
+function getTempMetaPath(id: string): string {
+  return path.join(tmpdir(), `meta-${id}.txt`)
+}
+
+function cleanupTempMeta(id: string): void {
+  fs.unlink(getTempMetaPath(id), () => {})
+}
+
+interface DownloadedMeta {
+  extractor: string
+  videoId: string
+  title: string
+}
+
+/** Повторные попытки дописывают файл, поэтому верна последняя строка. */
+function readDownloadedMeta(id: string): DownloadedMeta | null {
+  try {
+    const lines = fs.readFileSync(getTempMetaPath(id), 'utf8').split('\n').filter(Boolean)
+    const [extractor = '', videoId = '', ...titleParts] = (lines.at(-1) || '').split('\t')
+    if (!videoId) return null
+
+    return { extractor, videoId, title: titleParts.join(' ').trim().slice(0, 200) }
+  } catch {
+    return null
+  }
+}
+
 function getCookiesCandidates(url?: string): string[] {
   // Без URL — только для стартовой диагностики «настроены ли cookie вообще».
   if (!url) {
@@ -833,6 +902,7 @@ export function resolveCookiesFromBrowser(url: string): string | null {
 
 function cleanupDownloadArtifacts(id: string): void {
   cleanupTempCookies(id)
+  cleanupTempMeta(id)
   stopSizeWatchdog(id)
   clearDownloadTimeout(id)
   processes.delete(id)
@@ -1031,6 +1101,7 @@ interface RunContext {
   useProxy: boolean
   useCookies: boolean
   playlistItemIndex: number | null
+  entryId: string | null
 }
 
 function runYtDlpProcess(
@@ -1092,9 +1163,15 @@ function runYtDlpProcess(
       if (code !== 0) {
         console.warn(`⚠️  [${id}] yt-dlp exited with code ${code}, but file is valid. Marking as done.`)
       }
+      const meta = readDownloadedMeta(id)
+      if (meta) {
+        console.log(`🎬 [${id}] ${meta.extractor} ${meta.videoId} «${meta.title}» ← ${entry.url}`)
+        entry.title = meta.title || undefined
+      }
       entry.status = 'done'
       scheduleCleanup(entry)
       cleanupTempCookies(id)
+      cleanupTempMeta(id)
       stopSizeWatchdog(id)
       clearDownloadTimeout(id)
       return
@@ -1199,12 +1276,7 @@ function tryRetry(
 
   if (hasProxy && isProxyError) {
     console.log(`⚠️  [${id}] Proxy error, retrying without proxy...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
-      attempt: ctx.attempt,
-      useProxy: false,
-      useCookies: ctx.useCookies,
-      playlistItemIndex: ctx.playlistItemIndex,
-    })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, useProxy: false })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useProxy: false })
     return true
   }
@@ -1216,12 +1288,7 @@ function tryRetry(
   // Поэтому отвергнутые cookies — повод повторить попытку без них, а не сдаться.
   if (ctx.useCookies && isRejectedSession(logSummary) && hasCookiesFor(entry.url)) {
     console.log(`⚠️  [${id}] Источник не принял cookies, повтор без них...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
-      attempt: ctx.attempt,
-      useProxy: ctx.useProxy,
-      useCookies: false,
-      playlistItemIndex: ctx.playlistItemIndex,
-    })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, useCookies: false })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useCookies: false })
     return true
   }
@@ -1229,12 +1296,7 @@ function tryRetry(
   if (isYouTubeError && ctx.attempt < 2 && !process.env.YT_PLAYER_CLIENT) {
     const nextAttempt = ctx.attempt + 1
     console.log(`⚠️  [${id}] YouTube error, retrying with fallback player_client (attempt ${nextAttempt})...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, {
-      attempt: nextAttempt,
-      useProxy: ctx.useProxy,
-      useCookies: ctx.useCookies,
-      playlistItemIndex: ctx.playlistItemIndex,
-    })
+    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, attempt: nextAttempt })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, attempt: nextAttempt })
     return true
   }
@@ -1289,6 +1351,12 @@ function failDownload(id: string, entry: DownloadEntry, logSummary: string, code
 function getPublicErrorMessage(detail: string): string {
   if (/larger than max-filesize/i.test(detail)) {
     return `Видео больше лимита ${formatBytes(limits.maxDownloadBytes)}.`
+  }
+
+  // Фильтр с id ставится только при выборе истории из подборки, а истории
+  // в разы короче лимита — значит, не нашлась сама история.
+  if (/does not pass filter \([^)]*\bid=/i.test(detail)) {
+    return 'Эта история не найдена в подборке — возможно, её уже удалили.'
   }
 
   if (/does not pass filter/i.test(detail)) {

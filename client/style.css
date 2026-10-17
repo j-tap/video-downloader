@@ -63,6 +63,13 @@ body {
 .notify:empty {
   display: none;
 }
+.notify {
+  overflow-wrap: anywhere;
+}
+.notify a {
+  color: inherit;
+  text-decoration: underline;
+}
 
 .progress-container {
   position: absolute;

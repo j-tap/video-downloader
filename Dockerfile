@@ -21,15 +21,26 @@ ENV PATH="/usr/local/bin:${PATH}"
 # частая причина «часть видео перестала скачиваться».
 ARG YTDLP_REFRESH=latest
 
+# nightly — канал, который советуют сами авторы yt-dlp: починки экстракторов
+# выходят там в тот же день, а в stable доезжают через недели (между релизами
+# бывает по два месяца). YTDLP_CHANNEL=stable возвращает стабильные релизы.
+ARG YTDLP_CHANNEL=nightly
+
 # bgutil-ytdlp-pot-provider — плагин-клиент к провайдеру PO Token.
 # Сам провайдер поднимается отдельным сервисом (см. docker-compose.prod.yml);
 # если его нет, плагин просто ничего не делает.
 # Значение ARG обязано встречаться внутри RUN: docker сбрасывает кеш
 # в момент первого использования переменной, а не в момент её объявления.
-RUN echo "yt-dlp build refresh: ${YTDLP_REFRESH}" && \
+#
+# Nightly ставится вторым шагом и без зависимостей: глобальный --pre
+# притянул бы заодно бета-версии curl-cffi, requests и остального.
+RUN echo "yt-dlp build refresh: ${YTDLP_REFRESH} (${YTDLP_CHANNEL})" && \
     pip3 install --break-system-packages --no-cache-dir --upgrade \
     "yt-dlp[default,curl-cffi]" \
     bgutil-ytdlp-pot-provider && \
+    if [ "${YTDLP_CHANNEL}" = "nightly" ]; then \
+      pip3 install --break-system-packages --no-cache-dir --upgrade --pre --no-deps yt-dlp; \
+    fi && \
     yt-dlp --version
 
 WORKDIR /app
