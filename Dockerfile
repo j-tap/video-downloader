@@ -1,4 +1,4 @@
-FROM oven/bun:latest
+FROM oven/bun:1.3.14
 
 RUN apt update && \
     apt install -y --no-install-recommends \
