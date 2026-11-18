@@ -53,3 +53,13 @@ export function maskProxy(proxy: string | null): string {
 export function maskProxyArgs(args: string[]): string[] {
   return args.map((arg, index) => (args[index - 1] === '--proxy' ? maskProxy(arg) : arg))
 }
+
+/**
+ * Отказал сам выход, а не источник. «Unable to download» сюда не входит:
+ * так yt-dlp начинает и «unable to download video data: HTTP Error 403» —
+ * разовый отказ YouTube, который лечится повтором с того же выхода. Иначе
+ * загрузка уходила с рабочего VPN на заблокированный адрес сервера.
+ */
+export function isProxyFailure(log: string): boolean {
+  return /Unable to connect to proxy|ProxyError|Tunnel connection failed|SocksHTTPSConnection|Connection refused|Failed to establish a new connection|Name or service not known|Temporary failure in name resolution|timed out/i.test(log)
+}

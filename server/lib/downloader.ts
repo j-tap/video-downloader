@@ -6,7 +6,7 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process'
 import { formatBytes, formatDuration, limits } from './config'
 import { isPublicUrlSync } from './security/urlGuard'
 import { expandInstagramShortLink, getInstagramSelection, NO_SELECTION, type ItemSelection } from './instagramUrl'
-import { getProxyChain, maskProxy, maskProxyArgs } from './proxy'
+import { getProxyChain, isProxyFailure, maskProxy, maskProxyArgs } from './proxy'
 
 type Status = 'pending' | 'done' | 'error' | 'cancelled'
 
@@ -1276,7 +1276,7 @@ function tryRetry(
 ): boolean {
   if (isCancelled(id)) return false
 
-  const isProxyError = /timed out|proxy|Tunnel connection failed|Connection refused|SocksHTTPSConnection|Unable to download|Failed to establish/i.test(logSummary)
+  const isProxyError = isProxyFailure(logSummary)
   const isYouTubeError = isYouTube(entry.url) && /PO Token|reloaded|403|Sign in|age.restricted|format.*not available/i.test(logSummary)
 
   const chain = getUrlProxyChain(ctx.url)

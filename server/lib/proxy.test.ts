@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { getProxyChain, maskProxy, maskProxyArgs } from './proxy'
+import { getProxyChain, isProxyFailure, maskProxy, maskProxyArgs } from './proxy'
 
 /**
  * YouTube пускает сервер только через чужой выход, а остальные площадки
@@ -47,5 +47,20 @@ describe('маскировка', () => {
   test('в аргументах маскируется только значение --proxy', () => {
     const args = ['--proxy', 'socks5://u:p@h:1', '-o', 'user:pass@file', 'https://youtu.be/x']
     expect(maskProxyArgs(args)).toEqual(['--proxy', 'socks5://***@h:1', '-o', 'user:pass@file', 'https://youtu.be/x'])
+  })
+})
+
+describe('isProxyFailure', () => {
+  // Строки — из настоящего вывода yt-dlp.
+  test('мёртвый или ненайденный прокси — смена выхода', () => {
+    expect(isProxyFailure(`ERROR: [youtube] x: Unable to download API page: ('Unable to connect to proxy', NewConnectionError("HTTPSConnection(host='127.0.0.1', port=1): Failed to establish a new connection: [Errno 111] Connection refused"))`)).toBe(true)
+    expect(isProxyFailure(`ERROR: [youtube] x: Unable to download API page: ('Unable to connect to proxy', NameResolutionError("Failed to resolve 'vpn-proxy' ([Errno -2] Name or service not known)")) (caused by ProxyError(`)).toBe(true)
+    expect(isProxyFailure('ERROR: Unable to download webpage: Tunnel connection failed: 503 Service Unavailable')).toBe(true)
+  })
+
+  test('отказ YouTube — не повод уходить с выхода', () => {
+    expect(isProxyFailure('ERROR: unable to download video data: HTTP Error 403: Forbidden')).toBe(false)
+    expect(isProxyFailure("ERROR: [youtube] x: Sign in to confirm you're not a bot.")).toBe(false)
+    expect(isProxyFailure('ERROR: [youtube] x: Video unavailable')).toBe(false)
   })
 })
