@@ -8,6 +8,7 @@ import { createPageHandler } from './routes/page'
 import { cleanupOrphanedFiles, getCookiesConfig, verifyYtDlp } from './lib/downloader'
 import { clientIdMiddleware } from './lib/security/clientId'
 import { limits } from './lib/config'
+import { getProxyChain, maskProxy } from './lib/proxy'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -114,6 +115,15 @@ app.listen(port, () => {
     console.log(`Cookies: ${cookies.file}`)
   } else {
     console.warn('Cookies: не настроены (data/cookies.txt или COOKIES_FILE)')
+  }
+
+  // С адреса хостинга YouTube отвечает проверкой на бота на любое видео,
+  // поэтому забытый YT_PROXY видно сразу при старте, а не по жалобам.
+  const youtubeExits = getProxyChain('youtube')
+  if (youtubeExits.every((proxy) => proxy === null)) {
+    console.warn('Proxy YouTube: напрямую — с адреса хостинга YouTube обычно требует проверку на бота (YT_PROXY)')
+  } else {
+    console.log(`Proxy YouTube: ${youtubeExits.map(maskProxy).join(' → ')}`)
   }
 
   void reportPotProvider()

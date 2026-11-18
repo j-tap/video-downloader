@@ -16,6 +16,12 @@ services:
       YT_COOKIES_FILE: ${YT_COOKIES_FILE:-/app/data/cookiesYoutube.txt}
       KINOPUB_COOKIES_FILE: ${KINOPUB_COOKIES_FILE:-/app/data/cookiesKinoPub.txt}
       POT_PROVIDER_BASE_URL: ${POT_PROVIDER_BASE_URL:-http://potprovider:4416}
+      # С адреса хостинга YouTube отвечает «Sign in to confirm you're not a bot»
+      # на любое видео — пускает только через чужой выход. vpn-proxy — общий VPN
+      # сервера в сети vpn-egress (см. README, «Выход для YouTube»). direct
+      # в конце — на случай, если VPN на сервере не поднят. Пустое значение
+      # в .env (YT_PROXY=) отключает прокси совсем.
+      YT_PROXY: ${YT_PROXY-http://vpn-proxy:8888,direct}
     volumes:
       - ./data:/app/data:ro
     build:
@@ -30,6 +36,7 @@ services:
     networks:
       - traefik
       - internal
+      - vpn-egress
 
   # Выдаёт PO Token для YouTube. Без токена серверному IP достаётся либо 403,
   # либо единственная дорожка 360p. Наружу не публикуется: только внутренняя
@@ -50,3 +57,10 @@ networks:
     external: true
   internal:
     driver: bridge
+  # Общая сеть сервера только для выхода через VPN: в ней прокси и те, кто
+  # им пользуется, — без соседей VPN-контейнера (браузера, сайтов). Внутренняя,
+  # без своего шлюза: интернет у сервиса идёт как прежде, через traefik.
+  # Создаётся `make network` и живёт вне проектов, кто бы её ни создал первым.
+  vpn-egress:
+    external: true
+    name: ${VPN_EGRESS_NETWORK:-vpn-egress}

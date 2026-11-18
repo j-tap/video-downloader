@@ -6,6 +6,7 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process'
 import { formatBytes, formatDuration, limits } from './config'
 import { isPublicUrlSync } from './security/urlGuard'
 import { expandInstagramShortLink, getInstagramSelection, NO_SELECTION, type ItemSelection } from './instagramUrl'
+import { getProxyChain, maskProxy, maskProxyArgs } from './proxy'
 
 type Status = 'pending' | 'done' | 'error' | 'cancelled'
 
@@ -496,7 +497,7 @@ function runDownloadProcess(url: string, filePath: string, id: string, selection
     url: target.url,
     filePath,
     attempt: 0,
-    useProxy: true,
+    proxyIndex: 0,
     useCookies: true,
     playlistItemIndex,
     entryId,
@@ -505,14 +506,14 @@ function runDownloadProcess(url: string, filePath: string, id: string, selection
 
 interface BuildOptions {
   attempt?: number
-  useProxy?: boolean
+  proxyIndex?: number
   useCookies?: boolean
   playlistItemIndex?: number | null
   entryId?: string | null
 }
 
 function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
-  const { attempt = 0, useProxy = true, useCookies = true, playlistItemIndex = null, entryId = null } = options
+  const { attempt = 0, proxyIndex = 0, useCookies = true, playlistItemIndex = null, entryId = null } = options
   const args = [
     ...getPlaylistArgs(url, playlistItemIndex, entryId),
     '--no-warnings',
@@ -522,7 +523,7 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
     '--fragment-retries', '5',
     ...getLimitArgs(entryId),
     ...getJsRuntimeArgs(),
-    ...getProxyArgs(useProxy),
+    ...getProxyArgs(url, proxyIndex),
     ...getCookiesArgs(id, url, useCookies),
     ...getPlatformArgs(url, attempt),
     // Что именно скачалось — для лога и для подписи в интерфейсе.
@@ -635,7 +636,7 @@ function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarge
     '--yes-playlist',
     '--no-warnings',
     ...getJsRuntimeArgs(),
-    ...getProxyArgs(true),
+    ...getProxyArgs(url, 0),
     ...getCookiesArgs(id, url),
     url,
   ]
@@ -821,9 +822,13 @@ function getJsRuntimeArgs(): string[] {
   return []
 }
 
-function getProxyArgs(useProxy = true): string[] {
-  if (!useProxy) return []
-  const proxy = process.env.YT_PROXY || process.env.PROXY
+function getUrlProxyChain(url: string): Array<string | null> {
+  return getProxyChain(findCookieProfile(url)?.name ?? null)
+}
+
+function getProxyArgs(url: string, proxyIndex: number): string[] {
+  const chain = getUrlProxyChain(url)
+  const proxy = chain[Math.min(proxyIndex, chain.length - 1)]
   return proxy ? ['--proxy', proxy] : []
 }
 
@@ -1098,7 +1103,8 @@ interface RunContext {
   url: string
   filePath: string
   attempt: number
-  useProxy: boolean
+  /** Позиция в цепочке выходов площадки (см. proxy.ts). */
+  proxyIndex: number
   useCookies: boolean
   playlistItemIndex: number | null
   entryId: string | null
@@ -1110,7 +1116,7 @@ function runYtDlpProcess(
   filePath: string,
   ctx: RunContext,
 ): void {
-  console.log(`▶️ yt-dlp [attempt ${ctx.attempt}]:`, args.join(' '))
+  console.log(`▶️ yt-dlp [attempt ${ctx.attempt}]:`, maskProxyArgs(args).join(' '))
 
   const child = spawn(YTDLP_BIN, args)
   processes.set(id, child)
@@ -1270,14 +1276,21 @@ function tryRetry(
 ): boolean {
   if (isCancelled(id)) return false
 
-  const hasProxy = ctx.useProxy && (process.env.YT_PROXY || process.env.PROXY) !== undefined
-  const isProxyError = /timed out|proxy|Connection refused|SocksHTTPSConnection|Unable to download|Failed to establish/i.test(logSummary)
+  const isProxyError = /timed out|proxy|Tunnel connection failed|Connection refused|SocksHTTPSConnection|Unable to download|Failed to establish/i.test(logSummary)
   const isYouTubeError = isYouTube(entry.url) && /PO Token|reloaded|403|Sign in|age.restricted|format.*not available/i.test(logSummary)
 
-  if (hasProxy && isProxyError) {
-    console.log(`⚠️  [${id}] Proxy error, retrying without proxy...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, useProxy: false })
-    runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useProxy: false })
+  const chain = getUrlProxyChain(ctx.url)
+  const nextProxyIndex = ctx.proxyIndex + 1
+  const hasNextExit = nextProxyIndex < chain.length
+  const switchExit = (reason: string) => {
+    console.log(`⚠️  [${id}] ${reason}: ${maskProxy(chain[ctx.proxyIndex] ?? null)} → ${maskProxy(chain[nextProxyIndex] ?? null)}`)
+    const nextCtx = { ...ctx, proxyIndex: nextProxyIndex }
+    runYtDlpProcess(buildYtDlpArgs(ctx.url, filePath, id, nextCtx), id, filePath, nextCtx)
+  }
+
+  // Упавший прокси лечится только сменой выхода.
+  if (hasNextExit && isProxyError) {
+    switchExit('выход не отвечает')
     return true
   }
 
@@ -1286,10 +1299,19 @@ function tryRetry(
   // cookies yt-dlp вдобавок переключается на клиентов «для залогиненных»
   // и упирается в проверку на бота, хотя анонимно видео скачалось бы.
   // Поэтому отвергнутые cookies — повод повторить попытку без них, а не сдаться.
+  // Раньше смены выхода: иначе отказ сессии на рабочем VPN уводил бы загрузку
+  // на заблокированный адрес сервера, и VPN без cookies так и не пробовался.
   if (ctx.useCookies && isRejectedSession(logSummary) && hasCookiesFor(entry.url)) {
     console.log(`⚠️  [${id}] Источник не принял cookies, повтор без них...`)
     const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, useCookies: false })
     runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useCookies: false })
+    return true
+  }
+
+  // Проверка на бота без cookies вешается на адрес: другой клиент YouTube
+  // с того же адреса её не снимает, поэтому сначала меняем выход.
+  if (hasNextExit && isBotCheck(logSummary)) {
+    switchExit('источник не пускает этот адрес')
     return true
   }
 
@@ -1302,6 +1324,11 @@ function tryRetry(
   }
 
   return false
+}
+
+/** YouTube отказывает адресу, с которого пришёл запрос. */
+function isBotCheck(logSummary: string): boolean {
+  return /Sign in to confirm|not a bot/i.test(logSummary)
 }
 
 /** Источник увидел сессию и отказал именно ей, а не запросу вообще. */
@@ -1371,7 +1398,14 @@ function getPublicErrorMessage(detail: string): string {
     return 'Видео защищено DRM и не может быть скачано.'
   }
 
-  if (/Sign in to confirm|not a bot|age.restricted|authoriz|login|sign in|private|unauthorized|forbidden|403|access denied|cookies/i.test(detail)) {
+  // Проверка на бота — отказ серверу, а не видео: с домашнего IP та же ссылка
+  // качается. Раньше она попадала в «нужна авторизация», и посетитель
+  // считал видео закрытым.
+  if (/Sign in to confirm|not a bot/i.test(detail)) {
+    return 'YouTube сейчас не пускает наш сервер. Дело не в вашей ссылке — попробуйте позже.'
+  }
+
+  if (/age.restricted|authoriz|login|sign in|private|unauthorized|forbidden|403|access denied|cookies/i.test(detail)) {
     return 'Источник не отдаёт это видео без авторизации.'
   }
 
@@ -1396,10 +1430,17 @@ function getPublicErrorMessage(detail: string): string {
 
 function cleanErrorMessage(error: string): string {
   if (error.includes('Connection refused') && error.includes('SocksHTTPSConnection')) {
-    return 'Ошибка подключения к прокси. Проверьте YT_PROXY или отключите прокси.'
+    return 'Ошибка подключения к прокси. Проверьте PROXY / YT_PROXY и что контейнер прокси запущен.'
   }
 
   if (/Sign in to confirm/i.test(error)) {
+    const exits = getProxyChain('youtube').map(maskProxy).join(', ')
+    if (getProxyChain('youtube').every((proxy) => proxy === null)) {
+      return 'YouTube не пускает адрес сервера (проверка на бота). Нужен другой выход: YT_PROXY — VPN, WARP или резидентный прокси (см. README).'
+    }
+    if (/not a bot/i.test(error)) {
+      return `YouTube не пустил ни один выход (${exits}). Смените сервер VPN или добавьте в YT_PROXY ещё один выход.`
+    }
     const cookies = getCookiesConfig()
     if (!cookies.configured) {
       return 'YouTube требует авторизацию. Укажите YT_COOKIES_FILE (файл Netscape в data/cookiesYoutube.txt) или YT_COOKIES_FROM_BROWSER.'

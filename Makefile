@@ -11,10 +11,22 @@ export YTDLP_REFRESH
 
 COMPOSE_CMD = docker compose -p $(APP_NAME) --env-file .env -f docker-compose.prod.yml -f docker-compose.traefik.yml
 
+VPN_EGRESS_NETWORK ?= vpn-egress
+
+# Общая с другими проектами сеть выхода через VPN (см. README, «Выход для
+# YouTube»). Создаёт её тот, кто деплоится первым; повторный вызов ничего не
+# делает, а последний inspect прощает гонку, когда оба проекта деплоятся
+# одновременно и сеть успел создать сосед. --internal: у сети нет шлюза,
+# она не перехватит маршрут по умолчанию ни у VPN-контейнера, ни у приложений.
+network:
+	@docker network inspect $(VPN_EGRESS_NETWORK) >/dev/null 2>&1 \
+		|| docker network create --internal $(VPN_EGRESS_NETWORK) \
+		|| docker network inspect $(VPN_EGRESS_NETWORK) >/dev/null
+
 generate_traefik:
 	bash -c "set -a && source .env && envsubst < docker-compose.traefik.template.yml > docker-compose.traefik.yml"
 
-# --pull: без него oven/bun:latest (а с ним bun, ffmpeg и python)
+# --pull: без него базовый образ (а с ним ffmpeg и python)
 # навсегда остаётся тем, что скачался при первой сборке.
 build: generate_traefik
 	$(COMPOSE_CMD) build --pull
@@ -25,7 +37,7 @@ rebuild: generate_traefik
 up: build
 	docker run --rm --env-file .env -p $(PORT):$(PORT) -v $(PWD)/data:/app/data:ro $(APP_NAME):latest
 
-prod: build
+prod: network build
 	$(COMPOSE_CMD) up -d
 
 # Необязательная защита, по умолчанию выключена — см. README.

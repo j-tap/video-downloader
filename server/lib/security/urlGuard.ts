@@ -268,7 +268,7 @@ async function checkDnsResolvesToPublic(hostname: string): Promise<UrlGuardResul
     addresses = await withTimeout(dns.lookup(hostname, { all: true, verbatim: true }), DNS_TIMEOUT_MS)
   } catch (error) {
     // Нерезолвящееся имя — не признак внутреннего адреса: при работе через
-    // прокси (PROXY/YT_PROXY) имя резолвит прокси, а не мы. Пропускаем —
+    // прокси (PROXY, YT_PROXY и др.) имя резолвит прокси, а не мы. Пропускаем —
     // yt-dlp сам вернёт ошибку, если хост действительно недоступен.
     console.warn(`⚠️  DNS lookup failed for ${hostname}: ${(error as Error).message}`)
     return { ok: true }
