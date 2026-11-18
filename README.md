@@ -33,6 +33,9 @@ bun run dev
 - Facebook (`facebook.com`, `fb.com`, `fb.watch`)
 - Instagram (`instagram.com`, `instagr.am`)
 - kino.pub и её CDN `cdntogo.net` (обычно требует авторизацию через cookies)
+- TikTok (`tiktok.com`, короткие `vm.tiktok.com`, `vt.tiktok.com`)
+- VK (`vk.com`, `vk.ru`, `vkvideo.ru`)
+- Rutube (`rutube.ru`)
 
 Другие сайты отклоняются: сервис публичный, и открытый список хостов
 превращает его в прокси во внутреннюю сеть. Список расширяется через
@@ -136,13 +139,22 @@ YT_PROXY=http://vpn-proxy:8888,socks5://warp:1080,direct
 - `FACEBOOK_COOKIES_FILE` / `FACEBOOK_COOKIES_FROM_BROWSER`
 - Для ссылок Instagram/Facebook автоматически убираются трекинг-параметры (`utm_*`, `igsh` и т.п.)
 
+### TikTok / VK / Rutube
+
+- `TIKTOK_COOKIES_FILE` / `TIKTOK_COOKIES_FROM_BROWSER` (или `data/cookiesTiktok.txt`)
+- `VK_COOKIES_FILE` / `VK_COOKIES_FROM_BROWSER` (или `data/cookiesVk.txt`)
+- `RUTUBE_COOKIES_FILE` / `RUTUBE_COOKIES_FROM_BROWSER` (или `data/cookiesRutube.txt`)
+- Открытые ролики качаются без cookies. TikTok закрыт для части стран: если
+  он отвечает адресу сервера `403`, пустите его через VPN (`TIKTOK_PROXY`)
+
 Все cookie-файлы должны быть в формате Netscape.
 
 ## Полезные переменные окружения
 
 - `PORT` — порт сервера (по умолчанию `3000`)
 - `PROXY` — выход для всех площадок; `YT_PROXY`, `INSTAGRAM_PROXY`,
-  `FACEBOOK_PROXY`, `KINOPUB_PROXY` — для одной площадки, перекрывают `PROXY`.
+  `FACEBOOK_PROXY`, `KINOPUB_PROXY`, `TIKTOK_PROXY`, `VK_PROXY`,
+  `RUTUBE_PROXY` — для одной площадки, перекрывают `PROXY`.
   Список через запятую пробуется по порядку, `direct` — без прокси
   (см. [Выход для YouTube](#выход-для-youtube))
 - `VPN_EGRESS_NETWORK` — имя общей сети с VPN (по умолчанию `vpn-egress`)
@@ -157,7 +169,7 @@ YT_PROXY=http://vpn-proxy:8888,socks5://warp:1080,direct
 В Docker переменные приезжают в контейнер из `.env` через `env_file`,
 поэтому менять их можно без пересборки образа — достаточно `make restart`.
 
-## API
+## API сайта
 
 - `POST /download` — старт загрузки (`{ "url": "..." }`)
 - `GET /status/:id` — статус загрузки
@@ -167,13 +179,65 @@ YT_PROXY=http://vpn-proxy:8888,socks5://warp:1080,direct
 Сервис публичный, но загрузка привязана к клиенту: `/status`, `/file` и `/cancel`
 доступны только тому браузеру, который её запустил (cookie `vd_client`).
 
+## API для серверов (`/api/v1`)
+
+Второй вход — для серверов, которые забирают ролик к себе (первый клиент —
+Todi). Договор с ним — `docs/video-links.md` в репозитории childs-games:
+коды ошибок, поля ответа и пределы меняются только вместе с ним.
+
+Ключ — заголовок `Authorization: Bearer <секрет>`. Ключи именованные:
+
+```bash
+API_KEYS=todi:$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+```
+
+Пустой `API_KEYS` — весь `/api/v1` отвечает `401`, сайт работает как раньше.
+Отозванный ключ переносится в `API_KEYS_REVOKED` и получает `403`.
+
+| Запрос | Что делает |
+| --- | --- |
+| `POST /api/v1/jobs` | Поставить скачивание: `{ url, maxDurationSec, maxBytes, maxHeight }` → `202 { id, status }`. `Idempotency-Key` — повтор в течение суток возвращает ту же задачу |
+| `GET /api/v1/jobs/:id` | Состояние: `queued`, `downloading`, `processing`, `ready`, `failed`, `cancelled`, метаданные, `sha256`, `expiresAt` |
+| `GET /api/v1/jobs/:id/file` | Файл: `Range`, `ETag`, `X-Content-SHA256` |
+| `GET /api/v1/jobs/:id/thumbnail` | Обложка jpeg ≤ 1280 px и ≤ 500 КБ, или `404 no_thumbnail` |
+| `DELETE /api/v1/jobs/:id` | Отменить идущую или стереть готовую; всегда `204` |
+| `GET /api/v1/health` | Версия yt-dlp и загрузка сервера |
+
+Отличия от сайта:
+
+- **Пределы на ключ**, а не на IP и куку: 2 задачи в работе, до 20 в очереди
+  (дальше `503 queue_full`), 60 новых в час (`429 rate_limited`), оба
+  с `Retry-After`. Сайт и API делят `MAX_CONCURRENT_DOWNLOADS`, но API берёт
+  на одну меньше (`API_MAX_ACTIVE`) — посетителям сайта всегда остаётся место.
+- **Проверка до скачивания**: yt-dlp сначала читает метаданные, и длинный
+  ролик, большой файл, эфир, подборка или пост без видео отклоняются сразу.
+  Пределы клиент присылает в запросе, сервис берёт меньшее из своих и его.
+- **Файл по договору**: mp4, H.264 + AAC, `moov` в начале, высота не больше
+  `maxHeight`. Чего у источника нет, то перекодирует ffmpeg (`veryfast`).
+- **Хранение**: файл живёт час после готовности (у сайта — 5 минут), записи
+  о задачах — сутки. Всё лежит на томе (`API_DATA_DIR`): после перезапуска
+  клиент получает свою задачу, а прерванная загрузка начинается заново.
+- **Машинные коды ошибок**: `{ "error": { code, message, retryable,
+  retryAfterSec } }`. Сайт строит свой текст из того же кода.
+- **Журнал** — JSON-строки в stdout с `requestId` из `X-Request-Id` клиента:
+  поломку ищут по одному номеру на обеих сторонах. Секрет ключа, cookies
+  и `Authorization` в журнал не попадают.
+- CORS для `/api/v1` не включается: зовёт сервер, не браузер.
+
+Проверка после выкладки:
+
+```bash
+curl -s -H "Authorization: Bearer $KEY" https://downloader.vr9.pro/api/v1/health
+```
+
 ## Безопасность
 
 Сервис принимает URL от анонимных пользователей, поэтому каждая ссылка проверяется
 до запуска `yt-dlp`:
 
-- хост должен быть в белом списке площадок: YouTube, Instagram, Facebook, kino.pub
-  (и CDN `cdntogo.net`) — посторонние адреса отклоняются с `400` до запуска `yt-dlp`
+- хост должен быть в белом списке площадок: YouTube, Rutube, VK, TikTok,
+  Instagram, Facebook, kino.pub (и CDN `cdntogo.net`) — посторонние адреса
+  отклоняются с `400` до запуска `yt-dlp`
 - только `http`/`https`, только порты 80 и 443 (`ALLOWED_PORTS`)
 - запрещены ссылки с логином/паролем (`user:pass@host`)
 - блокируются IP внутренней сети: `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`,
@@ -215,7 +279,7 @@ Cookies привязаны к площадке по имени хоста: сс�
 страницы источника уже без DNS-проверки.
 
 На практике это прикрыто белым списком: посторонний может прислать ссылку
-только на пять площадок, свой домен подставить не может. Поэтому запрет egress
+только на площадки из списка, свой домен подставить не может. Поэтому запрет egress
 из контейнера — **необязательная страховка, по умолчанию выключенная**. Включать
 её стоит, если вы расширили `ALLOWED_HOSTS` (тем более до `*`) или во внутренней
 сети сервера есть что-то чувствительное:

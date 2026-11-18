@@ -3,10 +3,14 @@ import path from 'path'
 import { tmpdir } from 'os'
 import crypto from 'crypto'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
-import { formatBytes, formatDuration, limits } from './config'
+import { formatBytes, limits } from './config'
 import { isPublicUrlSync } from './security/urlGuard'
 import { expandInstagramShortLink, getInstagramSelection, NO_SELECTION, type ItemSelection } from './instagramUrl'
 import { getProxyChain, isProxyFailure, maskProxy, maskProxyArgs } from './proxy'
+import { classifyYtDlpOutput } from './errorCodes'
+import { getSiteMessage } from './siteMessages'
+import { runCapture } from './process'
+import { countActiveApiJobs } from './api/activity'
 
 type Status = 'pending' | 'done' | 'error' | 'cancelled'
 
@@ -37,7 +41,7 @@ const timeouts = new Map<string, ReturnType<typeof setTimeout>>()
 
 const SIZE_CHECK_INTERVAL_MS = 15_000
 
-const YTDLP_BIN = process.env.YTDLP_PATH || 'yt-dlp'
+export const YTDLP_BIN = process.env.YTDLP_PATH || 'yt-dlp'
 
 const DEFAULT_COOKIES_CANDIDATES = [
   process.env.COOKIES_FILE,
@@ -69,6 +73,24 @@ const FACEBOOK_COOKIES_CANDIDATES = [
   '/app/data/cookiesFacebook.txt',
 ].filter(Boolean) as string[]
 
+const TIKTOK_COOKIES_CANDIDATES = [
+  process.env.TIKTOK_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesTiktok.txt'),
+  '/app/data/cookiesTiktok.txt',
+].filter(Boolean) as string[]
+
+const VK_COOKIES_CANDIDATES = [
+  process.env.VK_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesVk.txt'),
+  '/app/data/cookiesVk.txt',
+].filter(Boolean) as string[]
+
+const RUTUBE_COOKIES_CANDIDATES = [
+  process.env.RUTUBE_COOKIES_FILE,
+  path.join(process.cwd(), 'data', 'cookiesRutube.txt'),
+  '/app/data/cookiesRutube.txt',
+].filter(Boolean) as string[]
+
 /**
  * Cookie строго привязаны к площадке. Общий файл (COOKIES_FILE / data/cookies.txt)
  * подставляется только к известной площадке: иначе достаточно было бы прислать
@@ -87,6 +109,9 @@ const COOKIE_PROFILES: CookieProfile[] = [
   { name: 'kino.pub', matches: (url) => isKinoPubRelated(url), files: KINOPUB_COOKIES_CANDIDATES, browserEnv: 'KINOPUB_COOKIES_FROM_BROWSER' },
   { name: 'instagram', matches: (url) => isInstagram(url), files: INSTAGRAM_COOKIES_CANDIDATES, browserEnv: 'INSTAGRAM_COOKIES_FROM_BROWSER' },
   { name: 'facebook', matches: (url) => isFacebook(url), files: FACEBOOK_COOKIES_CANDIDATES, browserEnv: 'FACEBOOK_COOKIES_FROM_BROWSER' },
+  { name: 'tiktok', matches: (url) => isTikTok(url), files: TIKTOK_COOKIES_CANDIDATES, browserEnv: 'TIKTOK_COOKIES_FROM_BROWSER' },
+  { name: 'vk', matches: (url) => isVk(url), files: VK_COOKIES_CANDIDATES, browserEnv: 'VK_COOKIES_FROM_BROWSER' },
+  { name: 'rutube', matches: (url) => isRutube(url), files: RUTUBE_COOKIES_CANDIDATES, browserEnv: 'RUTUBE_COOKIES_FROM_BROWSER' },
 ]
 
 function findCookieProfile(url: string): CookieProfile | null {
@@ -117,6 +142,9 @@ export function getCookiesConfig(): {
     || process.env.KINOPUB_COOKIES_FROM_BROWSER?.trim()
     || process.env.INSTAGRAM_COOKIES_FROM_BROWSER?.trim()
     || process.env.FACEBOOK_COOKIES_FROM_BROWSER?.trim()
+    || process.env.TIKTOK_COOKIES_FROM_BROWSER?.trim()
+    || process.env.VK_COOKIES_FROM_BROWSER?.trim()
+    || process.env.RUTUBE_COOKIES_FROM_BROWSER?.trim()
     || null
   const file = resolveCookiesFile()
 
@@ -186,13 +214,30 @@ export function startDownload(url: string, owner: DownloadOwner): StartDownloadR
   armDownloadTimeout(id)
   startSizeWatchdog(id)
 
-  runDownloadProcess(normalizeUrl(url), filePath, id, getItemSelection(url))
+  runDownloadProcess(normalizeUrl(url), filePath, id, getItemSelection(url)).catch((error) => {
+    console.error(`❌  [${id}] Download crashed:`, error)
+    const current = downloads.get(id)
+    if (current && current.status === 'pending') {
+      failDownload(id, current, String((error as Error)?.message || error))
+      cleanupDownloadArtifacts(id)
+      scheduleEntryRemoval(id, 5 * 60_000)
+    }
+  })
 
   return { ok: true, id }
 }
 
+/** Сколько загрузок сайта идёт сейчас — API делит с ними общий потолок сервера. */
+export function countActiveSiteDownloads(): number {
+  let active = 0
+  for (const entry of downloads.values()) {
+    if (entry.status === 'pending') active += 1
+  }
+  return active
+}
+
 /** Выбор считается по исходной ссылке: нормализация вырезает query-параметры. */
-function getItemSelection(url: string): ItemSelection {
+export function getItemSelection(url: string): ItemSelection {
   if (!isInstagram(url)) return NO_SELECTION
 
   try {
@@ -206,7 +251,8 @@ function getItemSelection(url: string): ItemSelection {
 function checkCapacity(ip: string): Extract<StartDownloadResult, { ok: false }> | null {
   const active = [...downloads.values()].filter((entry) => entry.status === 'pending')
 
-  if (active.length >= limits.maxConcurrentDownloads) {
+  // Потолок общий с API: задачи серверов тоже занимают ffmpeg, диск и канал.
+  if (active.length + countActiveApiJobs() >= limits.maxConcurrentDownloads) {
     return {
       ok: false,
       status: 503,
@@ -414,7 +460,7 @@ function getTempFilePath(id: string): string {
   return path.join(tmpdir(), `video-${id}.mp4`)
 }
 
-function normalizeUrl(url: string): string {
+export function normalizeUrl(url: string): string {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -470,8 +516,11 @@ function matchYouTubeId(value?: string): string | null {
   return value && YOUTUBE_ID_PATTERN.test(value) ? value : null
 }
 
-function runDownloadProcess(url: string, filePath: string, id: string, selection: ItemSelection): void {
-  const target = resolveDownloadTarget(url, id)
+async function runDownloadProcess(url: string, filePath: string, id: string, selection: ItemSelection): Promise<void> {
+  const target = await resolveDownloadTarget(url, id)
+  // Разбор страницы kino.pub идёт асинхронно — за это время загрузку могли отменить.
+  if (isCancelled(id) || !downloads.has(id)) return
+
   if (target.trailerOnly) {
     const entry = downloads.get(id)
     if (entry) {
@@ -504,7 +553,7 @@ function runDownloadProcess(url: string, filePath: string, id: string, selection
   })
 }
 
-interface BuildOptions {
+export interface BuildOptions {
   attempt?: number
   proxyIndex?: number
   useCookies?: boolean
@@ -512,7 +561,43 @@ interface BuildOptions {
   entryId?: string | null
 }
 
-function buildYtDlpArgs(url: string, filePath: string, id: string, options: BuildOptions = {}): string[] {
+/**
+ * Чем загрузка API отличается от загрузки сайта: своими пределами, форматом
+ * (высота и H.264 по договору), каталогом и обложкой. У сайта — значения
+ * по умолчанию, и его аргументы от этого не меняются.
+ */
+export interface DownloadProfile {
+  maxBytes: number
+  maxDurationSec: number
+  /** Аргументы формата вместо площадочных; аргументы источника (клиент YouTube, заголовки kino.pub) остаются. */
+  formatArgs?: string[]
+  /** Дописываются перед ссылкой. */
+  extraArgs?: string[]
+  metaPath: string
+  metaTemplate: string
+  cookiesPath: string
+}
+
+/** Что именно скачалось — для лога и для подписи в интерфейсе. */
+const SITE_META_TEMPLATE = 'after_move:%(extractor)s\t%(id)s\t%(title)s'
+
+function siteProfile(id: string): DownloadProfile {
+  return {
+    maxBytes: limits.maxDownloadBytes,
+    maxDurationSec: limits.maxDurationSeconds,
+    metaPath: getTempMetaPath(id),
+    metaTemplate: SITE_META_TEMPLATE,
+    cookiesPath: getTempCookiesPath(id),
+  }
+}
+
+export function buildYtDlpArgs(
+  url: string,
+  filePath: string,
+  id: string,
+  options: BuildOptions = {},
+  profile: DownloadProfile = siteProfile(id),
+): string[] {
   const { attempt = 0, proxyIndex = 0, useCookies = true, playlistItemIndex = null, entryId = null } = options
   const args = [
     ...getPlaylistArgs(url, playlistItemIndex, entryId),
@@ -521,19 +606,42 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
     '--socket-timeout', '30',
     '--retries', '5',
     '--fragment-retries', '5',
-    ...getLimitArgs(entryId),
+    ...getLimitArgs(entryId, profile),
     ...getJsRuntimeArgs(),
     ...getProxyArgs(url, proxyIndex),
-    ...getCookiesArgs(id, url, useCookies),
-    ...getPlatformArgs(url, attempt),
-    // Что именно скачалось — для лога и для подписи в интерфейсе.
+    ...getCookiesArgs(id, url, useCookies, profile.cookiesPath),
+    ...getPlatformArgs(url, attempt, profile.formatArgs),
     // Без этого жалобу «скачалось не то видео» нечем проверить.
-    '--print-to-file', 'after_move:%(extractor)s\t%(id)s\t%(title)s', getTempMetaPath(id),
+    '--print-to-file', profile.metaTemplate, profile.metaPath,
     '-o', filePath,
+    ...(profile.extraArgs ?? []),
     url,
   ]
 
   return args
+}
+
+/**
+ * Метаданные без скачивания — для проверки до загрузки (длительность, размер,
+ * эфир, подборка). Выход, cookies и клиент YouTube те же, что у загрузки:
+ * иначе метаданные читались бы с адреса, который источник не пускает.
+ * `--flat-playlist`: у подборки достаточно знать, что это подборка.
+ */
+export function buildProbeArgs(url: string, id: string, options: BuildOptions, profile: DownloadProfile): string[] {
+  const { attempt = 0, proxyIndex = 0, useCookies = true } = options
+  return [
+    '--dump-single-json',
+    '--no-warnings',
+    '--no-playlist',
+    '--flat-playlist',
+    '--socket-timeout', '30',
+    '--retries', '3',
+    ...getJsRuntimeArgs(),
+    ...getProxyArgs(url, proxyIndex),
+    ...getCookiesArgs(id, url, useCookies, profile.cookiesPath),
+    ...getPlatformArgs(url, attempt, profile.formatArgs),
+    url,
+  ]
 }
 
 /**
@@ -543,18 +651,18 @@ function buildYtDlpArgs(url: string, filePath: string, id: string, options: Buil
  * Выбор элемента по id идёт сюда же: несколько --match-filter объединяются
  * через ИЛИ, и отдельный фильтр по id снял бы лимит на длительность.
  */
-function getLimitArgs(entryId: string | null): string[] {
+function getLimitArgs(entryId: string | null, profile: DownloadProfile): string[] {
   // `<?` — пропускать, если поле отсутствует (часто у прямых m3u8)
-  const filters = [`duration<?${limits.maxDurationSeconds}`]
+  const filters = [`duration<?${profile.maxDurationSec}`]
   if (entryId) filters.push(`id=${entryId}`)
 
   return [
-    '--max-filesize', String(limits.maxDownloadBytes),
+    '--max-filesize', String(profile.maxBytes),
     '--match-filter', filters.join(' & '),
   ]
 }
 
-function getPlaylistArgs(url: string, playlistItemIndex: number | null, entryId: string | null): string[] {
+export function getPlaylistArgs(url: string, playlistItemIndex: number | null, entryId: string | null): string[] {
   if (!isKinoPub(url)) {
     // --no-playlist уважают не все экстракторы: карусель и хайлайт Instagram
     // приходят плейлистом всё равно. Без явного выбора yt-dlp качает каждый
@@ -593,7 +701,7 @@ interface YtDlpProbeEntry {
   url?: string
 }
 
-interface ResolvedDownloadTarget {
+export interface ResolvedDownloadTarget {
   url: string
   playlistItemIndex: number | null
   trailerOnly: boolean
@@ -605,12 +713,20 @@ interface KinoPubPlaylistItem {
   episode?: number
 }
 
-function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget {
+/**
+ * Асинхронно: страница kino.pub и её разбор занимают до полуминуты, и раньше
+ * spawnSync на это время останавливал весь сервер — вместе с опросом статуса.
+ */
+export async function resolveDownloadTarget(
+  url: string,
+  id: string,
+  cookiesPath: string = getTempCookiesPath(id),
+): Promise<ResolvedDownloadTarget> {
   if (!isKinoPub(url)) {
     return { url, playlistItemIndex: null, trailerOnly: false }
   }
 
-  const manifestFromPage = resolveKinoPubManifestFromPage(url, id)
+  const manifestFromPage = await resolveKinoPubManifestFromPage(url, id)
   // Манифест приходит со страницы kino.pub и лежит на её CDN — белый список
   // здесь не применяем, иначе смена CDN-хоста ломает загрузку. Схема, порт
   // и запрет приватных адресов проверяются как обычно.
@@ -621,7 +737,7 @@ function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget 
     return { url: manifestFromPage, playlistItemIndex: null, trailerOnly: false }
   }
 
-  const selected = resolveKinoPubMainEntry(url, id)
+  const selected = await resolveKinoPubMainEntry(url, id, cookiesPath)
   if (!selected) {
     return { url, playlistItemIndex: null, trailerOnly: false }
   }
@@ -629,7 +745,7 @@ function resolveDownloadTarget(url: string, id: string): ResolvedDownloadTarget 
   return selected
 }
 
-function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarget | null {
+async function resolveKinoPubMainEntry(url: string, id: string, cookiesPath: string): Promise<ResolvedDownloadTarget | null> {
   const probeArgs = [
     '--dump-single-json',
     '--skip-download',
@@ -637,16 +753,13 @@ function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarge
     '--no-warnings',
     ...getJsRuntimeArgs(),
     ...getProxyArgs(url, 0),
-    ...getCookiesArgs(id, url),
+    ...getCookiesArgs(id, url, true, cookiesPath),
     url,
   ]
 
-  const probe = spawnSync(YTDLP_BIN, probeArgs, {
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
-  })
+  const probe = await runCapture(YTDLP_BIN, probeArgs, { maxBuffer: 20 * 1024 * 1024, timeoutMs: 120_000 })
 
-  if (probe.status !== 0 || !probe.stdout?.trim()) {
+  if (probe.code !== 0 || !probe.stdout.trim()) {
     console.warn(`⚠️  [${id}] kino.pub preflight failed, using original URL`)
     return null
   }
@@ -696,8 +809,8 @@ function resolveKinoPubMainEntry(url: string, id: string): ResolvedDownloadTarge
   }
 }
 
-function resolveKinoPubManifestFromPage(url: string, id: string): string | null {
-  const html = fetchKinoPubPageHtml(url, id)
+async function resolveKinoPubManifestFromPage(url: string, id: string): Promise<string | null> {
+  const html = await fetchKinoPubPageHtml(url, id)
   if (!html) return null
 
   const playlist = extractPlayerPlaylist(html)
@@ -723,7 +836,7 @@ function resolveKinoPubManifestFromPage(url: string, id: string): string | null 
   return firstNonTrailer?.manifest || null
 }
 
-function fetchKinoPubPageHtml(url: string, id: string): string | null {
+async function fetchKinoPubPageHtml(url: string, id: string): Promise<string | null> {
   const cookiesFile = resolveCookiesFile(url)
   if (!cookiesFile) {
     console.warn(`⚠️  [${id}] kino.pub page parse skipped: cookies file not found`)
@@ -744,12 +857,9 @@ function fetchKinoPubPageHtml(url: string, id: string): string | null {
     url,
   ]
 
-  const result = spawnSync('curl', curlArgs, {
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
-  })
+  const result = await runCapture('curl', curlArgs, { maxBuffer: 20 * 1024 * 1024, timeoutMs: 30_000 })
 
-  if (result.status !== 0 || !result.stdout?.trim()) {
+  if (result.code !== 0 || !result.stdout.trim()) {
     console.warn(`⚠️  [${id}] kino.pub page parse failed, fallback to extractor preflight`)
     return null
   }
@@ -822,7 +932,7 @@ function getJsRuntimeArgs(): string[] {
   return []
 }
 
-function getUrlProxyChain(url: string): Array<string | null> {
+export function getUrlProxyChain(url: string): Array<string | null> {
   return getProxyChain(findCookieProfile(url)?.name ?? null)
 }
 
@@ -836,7 +946,11 @@ function getTempCookiesPath(id: string): string {
   return path.join(tmpdir(), `cookies-${id}.txt`)
 }
 
-export function getCookiesArgs(id: string, url: string, useCookies = true): string[] {
+/**
+ * yt-dlp дописывает обновлённые cookies обратно в файл, поэтому ему уходит
+ * копия: исходник в data/ смонтирован только на чтение и общий для всех.
+ */
+export function getCookiesArgs(id: string, url: string, useCookies = true, copyPath = getTempCookiesPath(id)): string[] {
   if (!useCookies) return []
 
   const fromBrowser = resolveCookiesFromBrowser(url)
@@ -847,9 +961,8 @@ export function getCookiesArgs(id: string, url: string, useCookies = true): stri
   const cookiesFile = resolveCookiesFile(url)
   if (!cookiesFile) return []
 
-  const tmpCookies = getTempCookiesPath(id)
-  fs.copyFileSync(cookiesFile, tmpCookies)
-  return ['--cookies', tmpCookies]
+  fs.copyFileSync(cookiesFile, copyPath)
+  return ['--cookies', copyPath]
 }
 
 function cleanupTempCookies(id: string): void {
@@ -938,7 +1051,7 @@ function isCancelled(id: string): boolean {
   return entry?.status === 'cancelled'
 }
 
-function isYouTube(url: string): boolean {
+export function isYouTube(url: string): boolean {
   return hasMatchingHostname(url, ['youtube.com', 'youtu.be'])
 }
 
@@ -946,12 +1059,24 @@ function isFacebook(url: string): boolean {
   return hasMatchingHostname(url, ['facebook.com', 'fb.com', 'fb.watch'])
 }
 
-function isInstagram(url: string): boolean {
+export function isInstagram(url: string): boolean {
   return hasMatchingHostname(url, ['instagram.com', 'instagr.am'])
 }
 
-function isKinoPub(url: string): boolean {
+export function isKinoPub(url: string): boolean {
   return hasMatchingHostname(url, ['kino.pub'])
+}
+
+function isTikTok(url: string): boolean {
+  return hasMatchingHostname(url, ['tiktok.com'])
+}
+
+function isVk(url: string): boolean {
+  return hasMatchingHostname(url, ['vk.com', 'vk.ru', 'vkvideo.ru'])
+}
+
+function isRutube(url: string): boolean {
+  return hasMatchingHostname(url, ['rutube.ru'])
 }
 
 function hasMatchingHostname(url: string, hosts: string[]): boolean {
@@ -978,12 +1103,14 @@ function getKinoPubHeaderArgs(): string[] {
   ]
 }
 
-function getPlatformArgs(url: string, attempt: number): string[] {
+function getPlatformArgs(url: string, attempt: number, formatArgs?: string[]): string[] {
   if (isYouTube(url)) {
-    return getYouTubeArgs(attempt)
+    return getYouTubeArgs(attempt, formatArgs)
   }
 
   if (isKinoPubRelated(url)) {
+    if (formatArgs) return [...formatArgs, ...getKinoPubHeaderArgs()]
+
     return [
       '-f', 'bv*+ba/b',
       '--merge-output-format', 'mp4',
@@ -992,6 +1119,8 @@ function getPlatformArgs(url: string, attempt: number): string[] {
       '--postprocessor-args', 'ffmpeg:-movflags +faststart',
     ]
   }
+
+  if (formatArgs) return formatArgs
 
   if (isFacebook(url) || isInstagram(url)) {
     return [
@@ -1025,8 +1154,8 @@ function getVideoFormat(): string {
   return process.env.VIDEO_FORMAT?.trim() || COMPATIBLE_VIDEO_FORMAT
 }
 
-function getYouTubeArgs(attempt: number): string[] {
-  const args: string[] = [
+function getYouTubeArgs(attempt: number, formatArgs?: string[]): string[] {
+  const args: string[] = formatArgs ? [...formatArgs] : [
     '-f', getVideoFormat(),
     '--merge-output-format', 'mp4',
     '--remux-video', 'mp4',
@@ -1099,15 +1228,19 @@ function getYouTubePlayerClient(attempt: number): string | null {
   return fallbacks[index] ?? null
 }
 
-interface RunContext {
+/** Всё, что меняется между попытками yt-dlp. */
+export interface AttemptContext {
   url: string
-  filePath: string
   attempt: number
   /** Позиция в цепочке выходов площадки (см. proxy.ts). */
   proxyIndex: number
   useCookies: boolean
   playlistItemIndex: number | null
   entryId: string | null
+}
+
+interface RunContext extends AttemptContext {
+  filePath: string
 }
 
 function runYtDlpProcess(
@@ -1276,22 +1409,38 @@ function tryRetry(
 ): boolean {
   if (isCancelled(id)) return false
 
+  const plan = planNextAttempt(logSummary, ctx, entry.url)
+  if (!plan) return false
+
+  console.log(`⚠️  [${id}] ${plan.reason}`)
+  runYtDlpProcess(buildYtDlpArgs(ctx.url, filePath, id, plan.ctx), id, filePath, plan.ctx)
+  return true
+}
+
+/**
+ * Следующая попытка после неудачи yt-dlp или null, если пробовать больше нечего.
+ * Общая для сайта и API: у обоих одни и те же выходы, cookies и клиенты YouTube.
+ * `sourceUrl` — ссылка, которую прислали (по ней видна площадка и её cookies).
+ */
+export function planNextAttempt<T extends AttemptContext>(
+  logSummary: string,
+  ctx: T,
+  sourceUrl: string,
+): { ctx: T; reason: string } | null {
   const isProxyError = isProxyFailure(logSummary)
-  const isYouTubeError = isYouTube(entry.url) && /PO Token|reloaded|403|Sign in|age.restricted|format.*not available/i.test(logSummary)
+  const isYouTubeError = isYouTube(sourceUrl) && /PO Token|reloaded|403|Sign in|age.restricted|format.*not available/i.test(logSummary)
 
   const chain = getUrlProxyChain(ctx.url)
   const nextProxyIndex = ctx.proxyIndex + 1
   const hasNextExit = nextProxyIndex < chain.length
-  const switchExit = (reason: string) => {
-    console.log(`⚠️  [${id}] ${reason}: ${maskProxy(chain[ctx.proxyIndex] ?? null)} → ${maskProxy(chain[nextProxyIndex] ?? null)}`)
-    const nextCtx = { ...ctx, proxyIndex: nextProxyIndex }
-    runYtDlpProcess(buildYtDlpArgs(ctx.url, filePath, id, nextCtx), id, filePath, nextCtx)
-  }
+  const switchExit = (why: string) => ({
+    ctx: { ...ctx, proxyIndex: nextProxyIndex },
+    reason: `${why}: ${maskProxy(chain[ctx.proxyIndex] ?? null)} → ${maskProxy(chain[nextProxyIndex] ?? null)}`,
+  })
 
   // Упавший прокси лечится только сменой выхода.
   if (hasNextExit && isProxyError) {
-    switchExit('выход не отвечает')
-    return true
+    return switchExit('выход не отвечает')
   }
 
   // Сессия, выгруженная из домашнего браузера, часто не принимается с адреса
@@ -1301,29 +1450,25 @@ function tryRetry(
   // Поэтому отвергнутые cookies — повод повторить попытку без них, а не сдаться.
   // Раньше смены выхода: иначе отказ сессии на рабочем VPN уводил бы загрузку
   // на заблокированный адрес сервера, и VPN без cookies так и не пробовался.
-  if (ctx.useCookies && isRejectedSession(logSummary) && hasCookiesFor(entry.url)) {
-    console.log(`⚠️  [${id}] Источник не принял cookies, повтор без них...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, useCookies: false })
-    runYtDlpProcess(retryArgs, id, filePath, { ...ctx, useCookies: false })
-    return true
+  if (ctx.useCookies && isRejectedSession(logSummary) && hasCookiesFor(sourceUrl)) {
+    return { ctx: { ...ctx, useCookies: false }, reason: 'Источник не принял cookies, повтор без них...' }
   }
 
   // Проверка на бота без cookies вешается на адрес: другой клиент YouTube
   // с того же адреса её не снимает, поэтому сначала меняем выход.
   if (hasNextExit && isBotCheck(logSummary)) {
-    switchExit('источник не пускает этот адрес')
-    return true
+    return switchExit('источник не пускает этот адрес')
   }
 
   if (isYouTubeError && ctx.attempt < 2 && !process.env.YT_PLAYER_CLIENT) {
     const nextAttempt = ctx.attempt + 1
-    console.log(`⚠️  [${id}] YouTube error, retrying with fallback player_client (attempt ${nextAttempt})...`)
-    const retryArgs = buildYtDlpArgs(ctx.url, filePath, id, { ...ctx, attempt: nextAttempt })
-    runYtDlpProcess(retryArgs, id, filePath, { ...ctx, attempt: nextAttempt })
-    return true
+    return {
+      ctx: { ...ctx, attempt: nextAttempt },
+      reason: `YouTube error, retrying with fallback player_client (attempt ${nextAttempt})...`,
+    }
   }
 
-  return false
+  return null
 }
 
 /** YouTube отказывает адресу, с которого пришёл запрос. */
@@ -1374,58 +1519,12 @@ function failDownload(id: string, entry: DownloadEntry, logSummary: string, code
  * с чем человек может что-то сделать сам. Имена переменных окружения, пути
  * к файлам cookies и сырой вывод yt-dlp остаются в логе сервера: посетителю
  * они ничего не дают, а нам показывают устройство сервиса.
+ *
+ * Причину определяет тот же разбор, что отдаёт коды API (errorCodes.ts):
+ * сайт и API не расходятся в том, что считать закрытым или удалённым видео.
  */
 function getPublicErrorMessage(detail: string): string {
-  if (/larger than max-filesize/i.test(detail)) {
-    return `Видео больше лимита ${formatBytes(limits.maxDownloadBytes)}.`
-  }
-
-  // Фильтр с id ставится только при выборе истории из подборки, а истории
-  // в разы короче лимита — значит, не нашлась сама история.
-  if (/does not pass filter \([^)]*\bid=/i.test(detail)) {
-    return 'Эта история не найдена в подборке — возможно, её уже удалили.'
-  }
-
-  if (/does not pass filter/i.test(detail)) {
-    return `Видео длиннее лимита в ${formatDuration(limits.maxDurationSeconds)}.`
-  }
-
-  if (/only trailer stream/i.test(detail)) {
-    return 'Для этой страницы доступен только трейлер.'
-  }
-
-  if (/DRM|Widevine|protected content|copyright protection/i.test(detail)) {
-    return 'Видео защищено DRM и не может быть скачано.'
-  }
-
-  // Проверка на бота — отказ серверу, а не видео: с домашнего IP та же ссылка
-  // качается. Раньше она попадала в «нужна авторизация», и посетитель
-  // считал видео закрытым.
-  if (/Sign in to confirm|not a bot/i.test(detail)) {
-    return 'YouTube сейчас не пускает наш сервер. Дело не в вашей ссылке — попробуйте позже.'
-  }
-
-  if (/age.restricted|authoriz|login|sign in|private|unauthorized|forbidden|403|access denied|cookies/i.test(detail)) {
-    return 'Источник не отдаёт это видео без авторизации.'
-  }
-
-  if (/Unsupported URL|No video formats found|404|not found|unavailable|removed|deleted/i.test(detail)) {
-    return 'Видео не найдено или ссылка не поддерживается.'
-  }
-
-  if (/Connection refused|SocksHTTPSConnection|proxy|timed out|Failed to establish|Unable to download/i.test(detail)) {
-    return 'Не удалось связаться с источником. Попробуйте позже.'
-  }
-
-  if (/Postprocessing|ffmpeg|Conversion failed|Error opening output files|Invalid data found/i.test(detail)) {
-    return 'Не удалось обработать видео. Попробуйте ещё раз.'
-  }
-
-  if (/File not found after download|Unable to read downloaded file|Downloaded file is empty/i.test(detail)) {
-    return 'Источник отдал некорректный файл. Попробуйте ещё раз.'
-  }
-
-  return 'Не удалось скачать видео. Попробуйте позже или пришлите другую ссылку.'
+  return getSiteMessage(classifyYtDlpOutput(detail))
 }
 
 function cleanErrorMessage(error: string): string {

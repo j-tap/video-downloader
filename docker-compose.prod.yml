@@ -22,8 +22,13 @@ services:
       # в конце — на случай, если VPN на сервере не поднят. Пустое значение
       # в .env (YT_PROXY=) отключает прокси совсем.
       YT_PROXY: ${YT_PROXY-http://vpn-proxy:8888,direct}
+      # База задач и файлы API для серверов (/api/v1). Том, а не каталог
+      # контейнера: после пересоздания клиент должен получить свою задачу
+      # или честный 404, а не ответ сервиса, который всё забыл.
+      API_DATA_DIR: ${API_DATA_DIR:-/app/storage/api}
     volumes:
       - ./data:/app/data:ro
+      - api-storage:/app/storage
     build:
       context: ./
       dockerfile: Dockerfile
@@ -51,6 +56,9 @@ services:
     init: true
     networks:
       - internal
+
+volumes:
+  api-storage:
 
 networks:
   traefik:

@@ -5,6 +5,7 @@ node_modules
 # запекать их в слои образа не нужно.
 .env
 data
+storage
 
 # Не влияет на сборку — только раздувает контекст и слои.
 .git
@@ -15,3 +16,4 @@ docker-compose*.yml
 Makefile
 README.md
 *.test.ts
+__fixtures__

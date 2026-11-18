@@ -22,6 +22,9 @@ const PLATFORM_PROXY_ENV: Record<string, string> = {
   'kino.pub': 'KINOPUB_PROXY',
   instagram: 'INSTAGRAM_PROXY',
   facebook: 'FACEBOOK_PROXY',
+  tiktok: 'TIKTOK_PROXY',
+  vk: 'VK_PROXY',
+  rutube: 'RUTUBE_PROXY',
 }
 
 type Env = Record<string, string | undefined>

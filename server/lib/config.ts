@@ -37,7 +37,7 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(0)} MB`
 }
 
-function readInt(name: string, fallback: number): number {
+export function readInt(name: string, fallback: number): number {
   const raw = process.env[name]
   if (!raw) return fallback
 
@@ -46,7 +46,7 @@ function readInt(name: string, fallback: number): number {
 }
 
 /** Понимает `4G`, `500M`, `1024K` и просто число байт. */
-function readBytes(name: string, fallback: number): number {
+export function readBytes(name: string, fallback: number): number {
   const raw = process.env[name]?.trim()
   if (!raw) return fallback
 

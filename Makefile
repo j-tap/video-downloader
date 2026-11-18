@@ -35,7 +35,7 @@ rebuild: generate_traefik
 	$(COMPOSE_CMD) build --pull --no-cache
 
 up: build
-	docker run --rm --env-file .env -p $(PORT):$(PORT) -v $(PWD)/data:/app/data:ro $(APP_NAME):latest
+	docker run --rm --env-file .env -p $(PORT):$(PORT) -v $(PWD)/data:/app/data:ro -v $(PWD)/storage:/app/storage $(APP_NAME):latest
 
 prod: network build
 	$(COMPOSE_CMD) up -d

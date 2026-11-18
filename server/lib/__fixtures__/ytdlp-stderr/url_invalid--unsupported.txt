@@ -1,0 +1,1 @@
+ERROR: Unsupported URL: https://vk.com/id1

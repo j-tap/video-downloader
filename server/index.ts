@@ -9,6 +9,7 @@ import { cleanupOrphanedFiles, getCookiesConfig, verifyYtDlp } from './lib/downl
 import { clientIdMiddleware } from './lib/security/clientId'
 import { limits } from './lib/config'
 import { getProxyChain, maskProxy } from './lib/proxy'
+import { createApiService } from './lib/api'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -20,6 +21,21 @@ const app = express()
 // rate limit считал бы всех пользователей одним клиентом.
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1))
 app.disable('x-powered-by')
+
+const ytDlp = verifyYtDlp()
+if (!ytDlp.ok) {
+  console.error(`❌ yt-dlp unavailable: ${ytDlp.error}`)
+  console.error('Install: pip install "yt-dlp[default]" or set YTDLP_PATH')
+  process.exit(1)
+}
+
+const api = createApiService({ ytDlpVersion: ytDlp.version ?? null })
+
+app.use(securityHeaders)
+
+// API для серверов — раньше CORS и куки vd_client: зовёт сервер, а не браузер,
+// и защиты для людей (кука, пределы по IP) к запросам с ключом не относятся.
+app.use('/api/v1', api.router)
 
 /**
  * CORS: по умолчанию запрещаем кросс-доменные вызовы — UI живёт на том же origin.
@@ -36,7 +52,6 @@ app.use(cors({
 }))
 
 app.use(express.json({ limit: '16kb' }))
-app.use(securityHeaders)
 app.use(clientIdMiddleware)
 
 const clientPath = path.join(__dirname, '../client')
@@ -79,17 +94,20 @@ function securityHeaders(_req: express.Request, res: express.Response, next: exp
   next()
 }
 
-const ytDlp = verifyYtDlp()
-if (!ytDlp.ok) {
-  console.error(`❌ yt-dlp unavailable: ${ytDlp.error}`)
-  console.error('Install: pip install "yt-dlp[default]" or set YTDLP_PATH')
-  process.exit(1)
-}
-
 const orphans = cleanupOrphanedFiles()
 if (orphans > 0) {
   console.log(`🧹 Удалено осиротевших временных файлов: ${orphans}`)
 }
+
+// Не только при старте: файл, брошенный упавшей загрузкой, иначе лежал бы
+// до следующего перезапуска, а перезапуски бывают раз в недели.
+const orphanTimer = setInterval(() => {
+  const removed = cleanupOrphanedFiles()
+  if (removed > 0) console.log(`🧹 Удалено осиротевших временных файлов: ${removed}`)
+}, 10 * 60_000)
+orphanTimer.unref?.()
+
+api.queue.start()
 
 app.listen(port, () => {
   console.log(`Server started on http://localhost:${port}`)
@@ -124,6 +142,17 @@ app.listen(port, () => {
     console.warn('Proxy YouTube: напрямую — с адреса хостинга YouTube обычно требует проверку на бота (YT_PROXY)')
   } else {
     console.log(`Proxy YouTube: ${youtubeExits.map(maskProxy).join(' → ')}`)
+  }
+
+  for (const problem of api.problems) console.warn(`⚠️  ${problem}`)
+  if (api.keyNames.length > 0) {
+    console.log(
+      `API /api/v1: ключи ${api.keyNames.join(', ')}`
+      + (api.revokedNames.length > 0 ? `, отозваны ${api.revokedNames.join(', ')}` : '')
+      + `; данные ${api.config.dataDir}`,
+    )
+  } else {
+    console.log('API /api/v1: выключен — API_KEYS пуст, все запросы получают 401')
   }
 
   void reportPotProvider()

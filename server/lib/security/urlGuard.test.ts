@@ -49,6 +49,13 @@ describe('assertPublicUrl', () => {
     'https://fb.watch/abc/',
     'https://kino.pub/item/view/123',
     'https://cdn.cdntogo.net/x/master.m3u8',
+    'https://www.tiktok.com/@user/video/7206382937372134662',
+    'https://vm.tiktok.com/ZMabcdef/',
+    'https://vt.tiktok.com/ZSabcdef/',
+    'https://vk.com/video-50883936_456244102',
+    'https://vk.ru/video-220754053_456242564',
+    'https://vkvideo.ru/video-50883936_456244102',
+    'https://rutube.ru/video/3eac3b4561676c17df9132a9a1e62e3e/',
   ]
 
   for (const url of allowed) {
@@ -64,6 +71,13 @@ describe('assertPublicUrl', () => {
 
   test('слишком длинный URL отклоняется', async () => {
     expect((await assertPublicUrl(`https://youtube.com/${'a'.repeat(3000)}`)).ok).toBe(false)
+  })
+
+  test('машинный код отказа: чужой сайт — site_unsupported, остальное — url_invalid', async () => {
+    expect((await assertPublicUrl('https://vimeo.com/76979871')).code).toBe('site_unsupported')
+    expect((await assertPublicUrl('http://127.0.0.1/')).code).toBe('url_invalid')
+    expect((await assertPublicUrl('ftp://youtube.com/x')).code).toBe('url_invalid')
+    expect((await assertPublicUrl('https://tiktok.com.evil.tld/@a/video/1')).code).toBe('site_unsupported')
   })
 
   test('в тексте ошибки перечислены поддерживаемые площадки', async () => {

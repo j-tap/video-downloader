@@ -34,5 +34,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 
 data/**
+# база задач и файлы API (/api/v1) при локальном запуске
+storage/
 # генерируется из docker-compose.traefik.template.yml (make generate_traefik)
 docker-compose.traefik.yml

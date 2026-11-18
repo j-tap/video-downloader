@@ -3,6 +3,11 @@ import { isIpLiteral, isPrivateIp } from './ip'
 
 export interface UrlGuardResult {
   ok: boolean
+  /**
+   * Машинный код отказа для API: хост вне белого списка — `site_unsupported`,
+   * всё остальное (схема, порт, внутренний адрес, редирект туда) — `url_invalid`.
+   */
+  code?: 'url_invalid' | 'site_unsupported'
   /** Безопасное для пользователя сообщение */
   error?: string
   /** Детали для лога, наружу не отдаются */
@@ -72,10 +77,17 @@ export const SUPPORTED_HOSTS = [
   'fb.watch',
   'kino.pub',
   'cdntogo.net',
+  // tiktok.com покрывает и короткие vm.tiktok.com / vt.tiktok.com: поддомены
+  // проходят по суффиксу, а их редирект проверяет checkRedirectChain.
+  'tiktok.com',
+  'vk.com',
+  'vk.ru',
+  'vkvideo.ru',
+  'rutube.ru',
 ] as const
 
 /** Человекочитаемый список для сообщения об ошибке */
-const SUPPORTED_PLATFORMS_TEXT = 'YouTube, Instagram, Facebook, kino.pub'
+const SUPPORTED_PLATFORMS_TEXT = 'YouTube, Rutube, VK, TikTok, Instagram, Facebook, kino.pub'
 
 /**
  * ALLOWED_HOSTS=youtube.com,kino.pub — заменить список своим.
@@ -92,6 +104,11 @@ const ALLOWED_HOSTS: readonly string[] = allowedHostsEnv.includes('*')
   : (allowedHostsEnv.length > 0 ? allowedHostsEnv : SUPPORTED_HOSTS)
 
 export async function assertPublicUrl(rawUrl: string, options: UrlGuardOptions = {}): Promise<UrlGuardResult> {
+  const result = await assertPublicUrlRaw(rawUrl, options)
+  return result.ok || result.code ? result : { ...result, code: 'url_invalid' }
+}
+
+async function assertPublicUrlRaw(rawUrl: string, options: UrlGuardOptions): Promise<UrlGuardResult> {
   const syncCheck = checkUrlSync(rawUrl, options)
   if (!syncCheck.ok) return syncCheck
 
@@ -180,7 +197,8 @@ export function isPublicUrlSync(rawUrl: string, options: UrlGuardOptions = {}): 
   return checkUrlSync(rawUrl, options).ok
 }
 
-function checkUrlSync(rawUrl: string, options: UrlGuardOptions = {}): UrlGuardResult {
+/** Проверка без сети: для мгновенного ответа API до DNS и редиректов. */
+export function checkUrlSync(rawUrl: string, options: UrlGuardOptions = {}): UrlGuardResult {
   const { enforceAllowlist = true } = options
 
   if (typeof rawUrl !== 'string' || rawUrl.trim() === '') {
@@ -233,6 +251,7 @@ function checkUrlSync(rawUrl: string, options: UrlGuardOptions = {}): UrlGuardRe
   if (enforceAllowlist && ALLOWED_HOSTS.length > 0 && !matchesAllowlist(hostname)) {
     return {
       ok: false,
+      code: 'site_unsupported',
       error: `Этот сайт не поддерживается. Доступны: ${SUPPORTED_PLATFORMS_TEXT}.`,
       detail: `host ${hostname} not in allowlist`,
     }
