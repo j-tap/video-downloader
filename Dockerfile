@@ -1,4 +1,6 @@
-FROM oven/bun:1.3.14
+# Точная версия, а не latest: так видно, какой Bun на проде, и патч
+# безопасности приезжает осознанно. Обновлять вместе с bun.lock.
+FROM oven/bun:1.4.4
 
 RUN apt update && \
     apt install -y --no-install-recommends \
